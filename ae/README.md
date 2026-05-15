@@ -74,3 +74,55 @@ The action is an integer:
 | 3 | `RIGHT` | Turn 90° clockwise |
 | 4 | `STAY` | Do not move |
 | 5 | `PLACE_BOMB` | Place a bomb at the current cell (requires `team_bombs > 0`) |
+
+## Current agent implementation
+
+`src/ae_manager.py` implements a stateful hybrid planner for Advanced maps:
+
+- Reconstructs a round-local belief map from `agent_viewcone` and `base_viewcone`.
+- Infers base-view shape from the incoming tensor instead of hard-coding one size.
+- Tracks seen walls, destructible walls, collectibles, enemy agents/bases, bombs, visited cells, and stale dynamic entities.
+- Simulates bomb hazards over future timesteps and uses direction-aware BFS over `(x, y, direction, time)`.
+- Prioritizes immediate bomb escape, safe opportunistic bombing, nearby base defense, reward collection, frontier exploration, and useful wall bombing.
+- Applies `action_mask` as the final guard and resets state on `step == 0`, step regression, empty `POST /ae`, or `POST /reset`.
+
+## Evaluation plan
+
+1. Run syntax and server smoke tests after each change:
+
+```bash
+python -m py_compile ae/src/ae_manager.py ae/src/ae_server.py
+```
+
+2. Build and run the official local AE test:
+
+```bash
+til build ae
+til test ae
+```
+
+3. For faster iteration, run the direct test script while the AE container is already serving on port 5005:
+
+```bash
+python test/test_ae.py
+```
+
+4. Track at least these metrics across repeated six-round runs: total reward, invalid actions, frozen ticks/deaths, mission/resource/recon pickups, bomb damage, base damage dealt/taken, and mean response latency.
+
+5. Validate with `TEAM_TRACK=advanced` and many random environment seeds. The local test uses random opponents, so also test against scripted greedy collectors and aggressive bombers before relying on the score.
+
+## Training and deployment follow-ups
+
+1. Add a local rollout harness that imports `til_environment` directly, runs hundreds of Advanced seeds, and logs reward breakdowns plus action/error counters to CSV.
+
+2. Tune the heuristic weights in `TILE_WEIGHTS`, frontier scoring, bomb thresholds, and defense radius with random search or Bayesian optimization over the rollout harness.
+
+3. Keep the planner as the safety layer. If learning is added, start with a small learned goal scorer that ranks candidate targets; do not let a neural policy bypass bomb-escape and action-mask checks.
+
+4. Before submission, rebuild the CPU AE image, run `til test ae`, verify `GET /health`, and submit only the validated tag:
+
+```bash
+til build ae
+til test ae
+til submit ae
+```

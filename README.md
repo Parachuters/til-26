@@ -25,7 +25,7 @@ git submodule update --init
 This repository requires Python 3.10 or newer to work. While it should theoretically all work fine with all packages installed directly into your base Python environment, it is likely a best practice to you create isolated virtual environments for each task. You can use any tool you'd like to do this; [`virtualenv`](https://virtualenv.pypa.io/en/latest/), [`venv`](https://docs.python.org/3/library/venv.html), [`poetry`](https://python-poetry.org/), etc. The competition instance on GCP comes with [`conda`](https://docs.conda.io/projects/conda/en/stable/user-guide/tasks/manage-environments.html) installed, allowing you to create and activate a new virtual environment with the following steps:
 
 ```bash
-conda create --name til-asr python=3.13
+conda create --name til-asr python=3.10
 conda activate til-asr
 ```
 

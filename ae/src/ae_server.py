@@ -4,6 +4,8 @@
 # to change anything in this file.
 
 
+import json
+
 from ae_manager import AEManager
 from fastapi import FastAPI, Request
 
@@ -18,8 +20,17 @@ async def ae(request: Request) -> dict[str, list[dict[str, int]]]:
     Returns action taken given current observation (int)
     """
 
-    # get observation, feed into model
-    input_json = await request.json()
+    # The direct local test script sends a legacy empty POST before each round.
+    # Treat that as a reset while keeping the normal competition payload path.
+    body = await request.body()
+    if not body:
+        manager.reset()
+        return {"predictions": []}
+
+    input_json = json.loads(body)
+    if "instances" not in input_json:
+        manager.reset()
+        return {"predictions": []}
 
     predictions = []
     # each is a dict with one key "observation" and the value as a dictionary observation
@@ -33,7 +44,11 @@ async def ae(request: Request) -> dict[str, list[dict[str, int]]]:
     return {"predictions": predictions}
 
 
-# ------------------------------ RESET REMOVED ------------------------------
+@app.post("/reset")
+def reset() -> dict[str, str]:
+    """Compatibility reset hook for local tooling."""
+    manager.reset()
+    return {"message": "reset ok"}
 
 
 @app.get("/health")

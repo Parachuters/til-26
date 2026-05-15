@@ -10,12 +10,16 @@ FROM nvcr.io/nvidia/pytorch:25.11-py3
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
+ENV HF_HOME=/workspace/.cache/huggingface
+ENV ASR_MODEL_NAME=large-v3
 WORKDIR /workspace
 
 # Installs your dependencies.
 RUN pip install -U pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+COPY download_model.py .
+RUN python download_model.py
 
 # Copies your source files.
 COPY src .

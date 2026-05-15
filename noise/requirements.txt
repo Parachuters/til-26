@@ -1,5 +1,9 @@
-# Dependencies for the CV container.
+# Dependencies for the noise container.
 
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
+ultralytics>=8.3.0
+torchvision
 pillow
+opencv-python-headless
+scikit-image

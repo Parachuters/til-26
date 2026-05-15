@@ -173,3 +173,4 @@ cython_debug/
 src/gcloud/*.json
 
 data
+Miniconda3-latest-Windows-x86_64.exe

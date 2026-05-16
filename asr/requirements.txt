@@ -6,3 +6,7 @@ faster-whisper>=1.1.0
 librosa>=0.10.2
 opencc-python-reimplemented>=0.1.7
 soundfile>=0.12.1
+
+# Fixes the missing ctranslate2 shared library error
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

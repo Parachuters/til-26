@@ -13,6 +13,8 @@ soundfile>=0.12.1
 pycocotools
 transformers
 torch
+accelerate>=0.26.0
+peft>=0.11.0
 numpy
 scikit-image
 stable-baselines3>=2.7.0

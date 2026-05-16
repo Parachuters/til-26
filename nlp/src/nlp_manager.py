@@ -24,9 +24,14 @@ except ImportError:
 
 try:
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    try:
+        from transformers import BitsAndBytesConfig
+    except ImportError:
+        BitsAndBytesConfig = None
     import torch
     _hf_available = True
 except ImportError:
+    BitsAndBytesConfig = None
     _hf_available = False
 
 try:
@@ -111,9 +116,13 @@ class NLPManager:
         # LLM: use 4-bit quantisation when bitsandbytes is available to halve
         # VRAM usage (~14 GB fp16 → ~4 GB int4) and speed up generation.
         load_kwargs: dict = {"device_map": "auto"}
-        if USE_4BIT and _bnb_available and device == "cuda":
-            load_kwargs["load_in_4bit"] = True
-            load_kwargs["bnb_4bit_compute_dtype"] = torch.float16
+        if USE_4BIT and _bnb_available and BitsAndBytesConfig is not None and device == "cuda":
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
         else:
             load_kwargs["torch_dtype"] = torch.float16 if device == "cuda" else torch.float32
 

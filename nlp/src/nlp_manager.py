@@ -42,14 +42,15 @@ except ImportError:
     _bnb_available = False
 
 
-EMBED_MODEL = os.getenv("NLP_EMBED_MODEL", "BAAI/bge-m3")
-RERANKER_MODEL = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+EMBED_MODEL = os.getenv("NLP_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+RERANKER_MODEL = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-base")
 LLM_MODEL = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-UNANSWERABLE_THRESHOLD = float(os.getenv("NLP_UNANSWERABLE_THRESHOLD", "0.45"))
+UNANSWERABLE_THRESHOLD = float(os.getenv("NLP_UNANSWERABLE_THRESHOLD", "0.35"))
 TOP_K = int(os.getenv("NLP_TOP_K", "10"))   # retrieve more candidates before reranking
 MAX_NEW_TOKENS = int(os.getenv("NLP_MAX_NEW_TOKENS", "256"))
-CHUNK_CHARS = int(os.getenv("NLP_CHUNK_CHARS", "1500"))
-OVERLAP_CHARS = int(os.getenv("NLP_OVERLAP_CHARS", "200"))
+CHUNK_CHARS = int(os.getenv("NLP_CHUNK_CHARS", "3500"))
+OVERLAP_CHARS = int(os.getenv("NLP_OVERLAP_CHARS", "250"))
+EMBED_BATCH_SIZE = int(os.getenv("NLP_EMBED_BATCH_SIZE", "128"))
 # BM25 weight in the hybrid score (1-BM25_WEIGHT goes to dense retrieval).
 BM25_WEIGHT = float(os.getenv("NLP_BM25_WEIGHT", "0.3"))
 # Use 4-bit quantisation for the LLM when bitsandbytes is available.
@@ -109,6 +110,8 @@ class NLPManager:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         self.embedder = SentenceTransformer(EMBED_MODEL, device=device)
+        if hasattr(self.embedder, "max_seq_length"):
+            self.embedder.max_seq_length = min(self.embedder.max_seq_length, 512)
 
         # Cross-encoder reranker — greatly improves top-3 precision for L3
         # cross-document and ambiguous questions.
@@ -165,7 +168,11 @@ class NLPManager:
 
         # --- Dense index (FAISS inner-product = cosine sim on normalised vecs) ---
         embeddings = self.embedder.encode(
-            chunks, batch_size=32, normalize_embeddings=True, show_progress_bar=False
+            chunks,
+            batch_size=EMBED_BATCH_SIZE,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
         )
         dim = embeddings.shape[1]
         self.index = faiss.IndexFlatIP(dim)

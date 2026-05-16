@@ -9,6 +9,7 @@ jiwer
 python-dotenv
 requests
 tqdm
+soundfile>=0.12.1
 pycocotools
 transformers
 torch

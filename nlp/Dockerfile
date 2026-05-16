@@ -7,6 +7,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
 ENV HF_HOME=/workspace/.cache/huggingface
 ENV NLP_EMBED_MODEL=BAAI/bge-m3
+ENV NLP_RERANKER_MODEL=BAAI/bge-reranker-v2-m3
 ENV NLP_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct
 WORKDIR /workspace
 
@@ -17,6 +18,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Pre-download models into the image (no internet at evaluation time)
 COPY download_model.py .
 RUN python download_model.py
+
+# Block all network access at runtime — all models must be in the cache
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
 
 # Copies your source files.
 COPY src .

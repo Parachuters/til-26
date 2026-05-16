@@ -2,13 +2,16 @@
 
 import os
 
-hf_home = os.getenv("HF_HOME", "/workspace/.cache/huggingface")
 embed_model = os.getenv("NLP_EMBED_MODEL", "BAAI/bge-m3")
+reranker_model = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 llm_model = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
 print(f"Downloading embedding model: {embed_model}")
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 SentenceTransformer(embed_model)
+
+print(f"Downloading reranker: {reranker_model}")
+CrossEncoder(reranker_model)
 
 print(f"Downloading LLM: {llm_model}")
 from transformers import AutoModelForCausalLM, AutoTokenizer

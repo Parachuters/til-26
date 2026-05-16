@@ -113,13 +113,42 @@ python test/test_ae.py
 
 ## Training and deployment follow-ups
 
-1. Add a local rollout harness that imports `til_environment` directly, runs hundreds of Advanced seeds, and logs reward breakdowns plus action/error counters to CSV.
+1. Establish the rule-based baseline on the GCP Workbench instance:
 
-2. Tune the heuristic weights in `TILE_WEIGHTS`, frontier scoring, bomb thresholds, and defense radius with random search or Bayesian optimization over the rollout harness.
+```bash
+til build ae
+til test ae
+```
 
-3. Keep the planner as the safety layer. If learning is added, start with a small learned goal scorer that ranks candidate targets; do not let a neural policy bypass bomb-escape and action-mask checks.
+Record `total rewards`, `score`, track, date, and commit before starting RL.
 
-4. Before submission, rebuild the CPU AE image, run `til test ae`, verify `GET /health`, and submit only the validated tag:
+2. Run a PPO harness smoke test:
+
+```bash
+python ae/train/train_ppo.py smoke --seed 0 --steps 20
+```
+
+3. Train PPO on randomized Advanced maps:
+
+```bash
+python ae/train/train_ppo.py train --timesteps 5000000 --seed 0
+```
+
+Outputs are written to `ae/train/runs/` and `ae/train/checkpoints/`, both ignored by Git.
+
+4. A/B test planner versus PPO over shared seeds:
+
+```bash
+python ae/train/train_ppo.py eval --model ae/train/checkpoints/ae_ppo.zip --episodes 60 --seed 100
+```
+
+5. Deploy PPO only after it consistently beats the planner. Copy the winning checkpoint to `ae/src/models/ae_ppo.zip` or set `AE_PPO_MODEL` to its path, then add runtime PPO dependencies to `ae/requirements.txt` before building the Docker image. If the model or dependencies are absent, `AEManager` automatically keeps using the planner.
+
+6. Tune the heuristic weights in `TILE_WEIGHTS`, frontier scoring, bomb thresholds, and defense radius with random search or Bayesian optimization over the rollout harness.
+
+7. Keep the planner as the safety layer. The optional PPO path is gated behind immediate hazard handling, bomb-escape validation, and final `action_mask` enforcement.
+
+8. Before submission, rebuild the CPU AE image, run `til test ae`, verify `GET /health`, and submit only the validated tag:
 
 ```bash
 til build ae

@@ -1,4 +1,5 @@
 # Dependencies for AE.
 
 fastapi
+numpy
 uvicorn[standard]

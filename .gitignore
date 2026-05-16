@@ -5,6 +5,9 @@
 # Large files like model weights, training data, and results should be ignored.
 **/models/
 **/results/
+ae/train/checkpoints/
+ae/train/runs/
+ae/train/eval.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

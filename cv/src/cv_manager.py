@@ -21,7 +21,7 @@ IOU_THRESHOLD = float(os.getenv("CV_IOU_THRESHOLD", "0.6"))
 # Override with CV_IMG_SIZE=640 if inference budget is tight.
 IMG_SIZE = int(os.getenv("CV_IMG_SIZE", "1280"))
 # Test-time augmentation (horizontal flip + multi-scale). Adds ~2x compute but
-# typically gains 2–3 mAP points. Disable with CV_TTA=0 if too slow.
+# typically gains 2-3 mAP points. Disable with CV_TTA=0 if too slow.
 TTA = os.getenv("CV_TTA", "1") not in ("0", "false", "False", "no")
 
 
@@ -65,7 +65,7 @@ class CVManager:
             for box in result.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 predictions.append({
-                    # Round to integers — pixel coordinates should not be floats.
+                    # Round to integers; pixel coordinates should not be floats.
                     "bbox": [round(x1), round(y1), round(x2 - x1), round(y2 - y1)],
                     "category_id": int(box.cls[0]),
                 })

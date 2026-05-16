@@ -65,8 +65,8 @@ model = YOLO("yolo11l.pt")  # pretrained COCO weights
 model.train(
     data="data.yaml",
     epochs=100,
-    imgsz=640,
-    batch=16,
+    imgsz=1280,
+    batch=-1,          # auto-batch; use an explicit value if needed
     device=0,
     augment=True,
     mosaic=1.0,
@@ -107,9 +107,9 @@ class CVManager:
         img = Image.open(io.BytesIO(image)).convert("RGB")
         results = self.model.predict(
             img,
-            conf=0.25,
-            iou=0.45,
-            imgsz=640,
+            conf=0.001,
+            iou=0.6,
+            imgsz=1280,
             device=0,
             verbose=False,
         )
@@ -141,7 +141,10 @@ Lower `conf` threshold → more true positives but also more FPs. For mAP scorin
 self.model.predict(img, conf=0.001, iou=0.6, ...)
 ```
 
-Tune on local validation set to maximize mAP@.5:.95.
+Tune on local validation set to maximize mAP@.5:.95. The local
+`test/test_cv.py` harness rewrites every returned detection score to `1.0`,
+so threshold tuning is more important than in a normal COCO evaluation where
+detections are ranked by confidence.
 
 ### 6. Multi-Scale Inference (TTA)
 

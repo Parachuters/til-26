@@ -3,7 +3,7 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 sentence-transformers>=2.7.0
-faiss-gpu
+faiss-gpu-cu12
 transformers>=4.45.0
 accelerate>=0.26.0
 rank_bm25>=0.2.2

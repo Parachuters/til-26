@@ -5,9 +5,13 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from math import inf
+import os
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+
+from ppo_preprocess import preprocess_observation
 
 
 # View channels.
@@ -108,6 +112,7 @@ class AEManager:
 
     def __init__(self) -> None:
         self.state = BeliefState()
+        self.rl_model = self._load_rl_model()
 
     def reset(self) -> None:
         self.state = BeliefState()
@@ -128,6 +133,39 @@ class AEManager:
         self._update_state(observation)
         hazards = self._build_hazards()
 
+        forced_action = self._forced_safety_action(observation, mask, hazards)
+        if forced_action is not None:
+            return forced_action
+
+        rl_action = self._rl_action(observation, mask, hazards)
+        if rl_action is not None:
+            return rl_action
+
+        return self._planner_action(mask, hazards)
+
+    def _load_rl_model(self) -> object | None:
+        if os.getenv("AE_DISABLE_RL", "").lower() in {"1", "true", "yes"}:
+            return None
+
+        default_path = Path(__file__).resolve().parent / "models" / "ae_ppo.zip"
+        model_path = Path(os.getenv("AE_PPO_MODEL", str(default_path)))
+        if not model_path.exists():
+            return None
+
+        try:
+            import ppo_policy  # noqa: F401  # Ensure custom extractor is importable.
+            from stable_baselines3 import PPO
+
+            return PPO.load(str(model_path), device="cpu")
+        except Exception:
+            return None
+
+    def _forced_safety_action(
+        self,
+        observation: dict,
+        mask: np.ndarray,
+        hazards: dict[int, set[Cell]],
+    ) -> int | None:
         if int(observation.get("frozen_ticks", 0)) > 0:
             return self._legal_or_fallback(STAY, mask, hazards)
 
@@ -137,6 +175,35 @@ class AEManager:
             action = self._path_to_nearest_safe(hazards)
             return self._legal_or_fallback(action, mask, hazards)
 
+        return None
+
+    def _rl_action(
+        self,
+        observation: dict,
+        mask: np.ndarray,
+        hazards: dict[int, set[Cell]],
+    ) -> int | None:
+        if self.rl_model is None:
+            return None
+
+        try:
+            action, _state = self.rl_model.predict(
+                preprocess_observation(observation),
+                deterministic=True,
+            )
+            candidate = int(np.asarray(action).item())
+        except Exception:
+            return None
+
+        if candidate == PLACE_BOMB and not self._escape_after_bomb_exists(hazards):
+            return None
+
+        filtered = self._legal_or_fallback(candidate, mask, hazards)
+        if filtered == candidate:
+            return filtered
+        return None
+
+    def _planner_action(self, mask: np.ndarray, hazards: dict[int, set[Cell]]) -> int:
         if self._should_place_attack_bomb(mask, hazards):
             return PLACE_BOMB
 

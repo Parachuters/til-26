@@ -46,3 +46,24 @@ where `x`, `y`, `w`, `h`, and `category_id` are defined as above.
 If your model detects no objects in a scene, your handler should output an empty list for that scene.
 
 The $k$-th element of `predictions` must be the prediction corresponding to the $k$-th element of `instances` for all $1 \le k \le n$, where n is the number of input instances. The length of `predictions` must equal that of `instances`.
+
+## Training workflow
+
+Run this on the GCP Workbench instance where `/home/jupyter/$TEAM_TRACK/cv` exists:
+
+```bash
+pip install -r cv/requirements.txt
+python cv/prepare_dataset.py --data-dir /home/jupyter/$TEAM_TRACK/cv --output-dir /home/jupyter/$TEAM_TRACK/cv_yolo
+python cv/train_yolo.py --data /home/jupyter/$TEAM_TRACK/cv_yolo/data.yaml
+til build cv
+til test cv
+```
+
+`cv/train_yolo.py` trains `yolo11l.pt` at `imgsz=1280` for up to 100 epochs with the advanced-track augmentations, then copies `runs/cv/yolo11l_adv/weights/best.pt` to `cv/best.pt` for the Dockerfile.
+
+If inference is too slow during `til test cv`, rebuild with test-time augmentation disabled:
+
+```bash
+CV_TTA=0 til build cv
+CV_TTA=0 til test cv
+```

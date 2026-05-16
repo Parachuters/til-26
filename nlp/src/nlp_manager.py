@@ -1,6 +1,7 @@
 """Manages the NLP model."""
 
 import os
+import threading
 
 import numpy as np
 
@@ -43,7 +44,7 @@ except ImportError:
 
 EMBED_MODEL = os.getenv("NLP_EMBED_MODEL", "BAAI/bge-m3")
 RERANKER_MODEL = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-LLM_MODEL = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+LLM_MODEL = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 UNANSWERABLE_THRESHOLD = float(os.getenv("NLP_UNANSWERABLE_THRESHOLD", "0.45"))
 TOP_K = int(os.getenv("NLP_TOP_K", "10"))   # retrieve more candidates before reranking
 MAX_NEW_TOKENS = int(os.getenv("NLP_MAX_NEW_TOKENS", "256"))
@@ -115,25 +116,45 @@ class NLPManager:
 
         # LLM: use 4-bit quantisation when bitsandbytes is available to halve
         # VRAM usage (~14 GB fp16 → ~4 GB int4) and speed up generation.
-        load_kwargs: dict = {"device_map": "auto"}
-        if USE_4BIT and _bnb_available and BitsAndBytesConfig is not None and device == "cuda":
-            load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
-            )
-        else:
-            load_kwargs["torch_dtype"] = torch.float16 if device == "cuda" else torch.float32
-
-        self.tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
-        self.llm = AutoModelForCausalLM.from_pretrained(LLM_MODEL, **load_kwargs)
-        self.llm.eval()
-
+        self.device = device
+        self.tokenizer = None
+        self.llm = None
+        self._llm_lock = threading.Lock()
         self.index = None
         self.bm25 = None
         self.doc_ids: list[str] = []
         self.doc_texts: list[str] = []
+
+    def _ensure_llm(self) -> None:
+        """Loads the generator on first use so /health is available quickly."""
+        if self.llm is not None:
+            return
+
+        with self._llm_lock:
+            if self.llm is not None:
+                return
+
+            load_kwargs: dict = {"device_map": "auto"}
+            if (
+                USE_4BIT
+                and _bnb_available
+                and BitsAndBytesConfig is not None
+                and self.device == "cuda"
+            ):
+                load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                )
+            else:
+                load_kwargs["torch_dtype"] = (
+                    torch.float16 if self.device == "cuda" else torch.float32
+                )
+
+            self.tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
+            self.llm = AutoModelForCausalLM.from_pretrained(LLM_MODEL, **load_kwargs)
+            self.llm.eval()
 
     def load_corpus(self, documents: list[dict[str, str]]) -> None:
         """Loads the corpus of documents for RAG QA."""
@@ -217,6 +238,7 @@ class NLPManager:
         return {"documents": top3_ids, "answer": answer}
 
     def _generate_answer(self, question: str, context: str) -> str:
+        self._ensure_llm()
         user_content = (
             f"Documents:\n{context}\n\nQuestion: {question}\n"
             "Answer (or UNANSWERABLE):"

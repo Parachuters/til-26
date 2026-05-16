@@ -4,7 +4,7 @@ import os
 
 embed_model = os.getenv("NLP_EMBED_MODEL", "BAAI/bge-m3")
 reranker_model = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-llm_model = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+llm_model = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 
 print(f"Downloading embedding model: {embed_model}")
 from sentence_transformers import SentenceTransformer, CrossEncoder

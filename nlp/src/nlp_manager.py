@@ -1,6 +1,7 @@
 """Manages the NLP model."""
 
 import os
+import re
 import threading
 
 import numpy as np
@@ -46,15 +47,20 @@ EMBED_MODEL = os.getenv("NLP_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 RERANKER_MODEL = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-base")
 LLM_MODEL = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 UNANSWERABLE_THRESHOLD = float(os.getenv("NLP_UNANSWERABLE_THRESHOLD", "0.35"))
-TOP_K = int(os.getenv("NLP_TOP_K", "10"))   # retrieve more candidates before reranking
-MAX_NEW_TOKENS = int(os.getenv("NLP_MAX_NEW_TOKENS", "256"))
-CHUNK_CHARS = int(os.getenv("NLP_CHUNK_CHARS", "3500"))
-OVERLAP_CHARS = int(os.getenv("NLP_OVERLAP_CHARS", "250"))
+TOP_K = int(os.getenv("NLP_TOP_K", "40"))   # retrieve more candidates before reranking
+RERANK_TOP_K = int(os.getenv("NLP_RERANK_TOP_K", "20"))
+MAX_NEW_TOKENS = int(os.getenv("NLP_MAX_NEW_TOKENS", "64"))
+CHUNK_WORDS = int(os.getenv("NLP_CHUNK_WORDS", "420"))
+OVERLAP_WORDS = int(os.getenv("NLP_OVERLAP_WORDS", "80"))
 EMBED_BATCH_SIZE = int(os.getenv("NLP_EMBED_BATCH_SIZE", "128"))
 # BM25 weight in the hybrid score (1-BM25_WEIGHT goes to dense retrieval).
 BM25_WEIGHT = float(os.getenv("NLP_BM25_WEIGHT", "0.3"))
 # Use 4-bit quantisation for the LLM when bitsandbytes is available.
 USE_4BIT = os.getenv("NLP_USE_4BIT", "1") not in ("0", "false", "False", "no")
+BGE_QUERY_INSTRUCTION = (
+    "Represent this sentence for searching relevant passages: "
+)
+_TOKEN_RE = re.compile(r"\b\w+\b", flags=re.UNICODE)
 
 # System prompt grounded in the Clairos fictional setting so the LLM does not
 # confuse in-world terminology with real-world knowledge.
@@ -71,21 +77,46 @@ SYSTEM_PROMPT = (
 )
 
 
-def _chunk_documents(texts, ids, max_chars=CHUNK_CHARS, overlap=OVERLAP_CHARS):
+def _tokenize_for_sparse(text: str) -> list[str]:
+    """Tokenize text for lexical retrieval without losing named entities."""
+    return [
+        token.strip("'").lower()
+        for token in _TOKEN_RE.findall(text)
+        if token.strip("'")
+    ]
+
+
+def _format_embed_query(question: str) -> str:
+    """BGE-style query instruction improves asymmetric retrieval quality."""
+    if question.startswith(BGE_QUERY_INSTRUCTION):
+        return question
+    return f"{BGE_QUERY_INSTRUCTION}{question}"
+
+
+def _chunk_documents(
+    texts,
+    ids,
+    max_words: int = CHUNK_WORDS,
+    overlap_words: int = OVERLAP_WORDS,
+):
     chunks, chunk_ids = [], []
     for doc_id, text in zip(ids, texts):
-        if len(text) <= max_chars:
+        matches = list(_TOKEN_RE.finditer(text))
+        if len(matches) <= max_words:
             chunks.append(text)
             chunk_ids.append(doc_id)
         else:
             start = 0
-            while start < len(text):
-                end = start + max_chars
-                chunks.append(text[start:end])
+            step = max(1, max_words - overlap_words)
+            while start < len(matches):
+                end = min(start + max_words, len(matches))
+                char_start = matches[start].start()
+                char_end = matches[end - 1].end()
+                chunks.append(text[char_start:char_end].strip())
                 chunk_ids.append(doc_id)
-                if end >= len(text):
+                if end >= len(matches):
                     break
-                start += max_chars - overlap
+                start += step
     return chunks, chunk_ids
 
 
@@ -180,7 +211,7 @@ class NLPManager:
 
         # --- Sparse index (BM25) — improves recall for proper nouns / named entities ---
         if _bm25_available:
-            tokenised = [c.lower().split() for c in chunks]
+            tokenised = [_tokenize_for_sparse(c) for c in chunks]
             self.bm25 = BM25Okapi(tokenised)
 
         self.doc_ids = chunk_ids
@@ -196,16 +227,20 @@ class NLPManager:
             L5 (false premise): documents populated, answer empty.
         """
         # --- Step 1: Hybrid retrieval (dense + BM25) ---
-        q_emb = self.embedder.encode([question], normalize_embeddings=True)
+        q_emb = self.embedder.encode(
+            [_format_embed_query(question)],
+            normalize_embeddings=True,
+        )
         scores, indices = self.index.search(q_emb.astype(np.float32), TOP_K)
         dense_ranked = [int(i) for i in indices[0]]
 
         if self.bm25 is not None:
-            bm25_scores = self.bm25.get_scores(question.lower().split())
+            bm25_scores = self.bm25.get_scores(_tokenize_for_sparse(question))
             bm25_ranked = list(np.argsort(bm25_scores)[::-1][:TOP_K])
             combined = _rrf_merge(dense_ranked, bm25_ranked)
         else:
             combined = dense_ranked
+        combined = combined[:RERANK_TOP_K]
 
         # L4 guard: if the top dense score is below threshold, declare unanswerable
         max_dense_score = float(scores[0][0])

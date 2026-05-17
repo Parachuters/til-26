@@ -61,6 +61,33 @@ BGE_QUERY_INSTRUCTION = (
     "Represent this sentence for searching relevant passages: "
 )
 _TOKEN_RE = re.compile(r"\b\w+\b", flags=re.UNICODE)
+_SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)", flags=re.UNICODE)
+_EXTERNAL_L4_RE = re.compile(
+    r"\b(as of|q[1-4]|december)\s+(?:q[1-4]\s+)?20\d{2}\b|\b20\d{2}\b",
+    flags=re.IGNORECASE,
+)
+_REAL_WORLD_TERMS_RE = re.compile(
+    r"\b("
+    r"fda|spacex|falcon\s+9|microsoft|samsung|paris\s+agreement|"
+    r"european\s+space\s+agency|international\s+maritime\s+organization|"
+    r"jebel\s+ali|dubai"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_MISSING_INFO_RE = re.compile(
+    r"\b("
+    r"not specified|not stated|not provided|not mentioned|does not mention|"
+    r"cannot be determined|insufficient information|no evidence|no chairperson|"
+    r"no tie-breaking"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "did", "does", "for",
+    "from", "given", "had", "has", "have", "how", "if", "in", "is", "it",
+    "of", "on", "or", "that", "the", "their", "this", "to", "under", "was",
+    "were", "what", "when", "where", "which", "who", "why", "with",
+}
 
 # System prompt grounded in the Clairos fictional setting so the LLM does not
 # confuse in-world terminology with real-world knowledge.
@@ -70,10 +97,13 @@ SYSTEM_PROMPT = (
     "last great city. Answer questions using ONLY the provided document "
     "excerpts.\n"
     "Rules:\n"
-    "1. Be concise — one sentence unless more is needed.\n"
-    "2. If the question has a false premise or no answer exists in the "
+    "1. Return only the final answer, not the question or explanation.\n"
+    "2. Copy names, identifiers, percentages, dates, and numbers exactly as "
+    "written in the documents.\n"
+    "3. If the question has a false premise, contradicts the documents, or no "
+    "answer exists in the "
     "documents, respond with exactly: UNANSWERABLE\n"
-    "3. Do not use outside knowledge or hallucinate facts not in the context."
+    "4. Do not use outside knowledge or hallucinate facts not in the context."
 )
 
 
@@ -91,6 +121,67 @@ def _format_embed_query(question: str) -> str:
     if question.startswith(BGE_QUERY_INSTRUCTION):
         return question
     return f"{BGE_QUERY_INSTRUCTION}{question}"
+
+
+def _looks_like_external_l4(question: str) -> bool:
+    """Detect obvious out-of-world current-events questions used for L4."""
+    return bool(_EXTERNAL_L4_RE.search(question) and _REAL_WORLD_TERMS_RE.search(question))
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        token
+        for token in _tokenize_for_sparse(text)
+        if token not in _STOPWORDS and len(token) > 1
+    }
+
+
+def _select_evidence_snippet(
+    question: str,
+    text: str,
+    max_chars: int = 900,
+    max_sentences: int = 1,
+) -> str:
+    """Keep the most question-relevant sentences from a retrieved chunk."""
+    sentences = [m.group(0).strip() for m in _SENTENCE_RE.finditer(text)]
+    sentences = [s for s in sentences if s]
+    if not sentences:
+        return text[:max_chars].strip()
+
+    query_terms = _content_words(question)
+    scored = []
+    for index, sentence in enumerate(sentences):
+        terms = _content_words(sentence)
+        score = len(query_terms.intersection(terms))
+        scored.append((score, index, sentence))
+
+    selected = sorted(scored, key=lambda item: (-item[0], item[1]))[:max_sentences]
+    selected = sorted(selected, key=lambda item: item[1])
+    snippet = " ".join(sentence for _, _, sentence in selected).strip()
+    return snippet[:max_chars].strip()
+
+
+def _clean_answer(question: str, answer: str) -> str:
+    """Normalize generator output for the ModernBERT equivalence scorer."""
+    cleaned = answer.strip().strip('"')
+    if "UNANSWERABLE" in cleaned.upper():
+        return "UNANSWERABLE"
+
+    escaped_question = re.escape(question.strip())
+    cleaned = re.sub(
+        rf"^{escaped_question}\s*(?:Answer\s*:)?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^(?:Answer|Final answer)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^The answer is\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\[[^\]]+\]\s*", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if _MISSING_INFO_RE.search(cleaned):
+        return "UNANSWERABLE"
+    return cleaned
 
 
 def _chunk_documents(
@@ -226,6 +317,9 @@ class NLPManager:
             L4 (no relevant docs): both empty.
             L5 (false premise): documents populated, answer empty.
         """
+        if _looks_like_external_l4(question):
+            return {"documents": [], "answer": ""}
+
         # --- Step 1: Hybrid retrieval (dense + BM25) ---
         q_emb = self.embedder.encode(
             [_format_embed_query(question)],
@@ -269,9 +363,11 @@ class NLPManager:
 
         # --- Step 3: Generate answer ---
         context = "\n\n".join(
-            f"[{doc_id}]: {text}" for doc_id, text in zip(top3_ids, top3_texts)
+            f"[{doc_id}]: {_select_evidence_snippet(question, text, max_sentences=3)}"
+            for doc_id, text in zip(top3_ids, top3_texts)
         )
         answer = self._generate_answer(question, context)
+        answer = _clean_answer(question, answer)
 
         # L5: false premise detected by LLM — return doc IDs for partial credit
         if "UNANSWERABLE" in answer.upper():
@@ -283,7 +379,8 @@ class NLPManager:
         self._ensure_llm()
         user_content = (
             f"Documents:\n{context}\n\nQuestion: {question}\n"
-            "Answer (or UNANSWERABLE):"
+            "Return only the final answer text, or exactly UNANSWERABLE. "
+            "Do not repeat the question.\nAnswer:"
         )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

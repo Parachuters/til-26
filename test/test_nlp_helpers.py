@@ -84,3 +84,42 @@ def test_embed_query_text_adds_bge_instruction_for_plain_question():
 
     assert query.startswith("Represent this sentence for searching relevant passages:")
     assert query.endswith("Who governs Haven?")
+
+
+def test_external_current_events_guard_flags_l4_real_world_questions():
+    manager = _load_nlp_manager_module()
+
+    assert manager._looks_like_external_l4(
+        "What is the current FDA approval status for human somatic gene therapy "
+        "treatments as of 2024?"
+    )
+    assert not manager._looks_like_external_l4(
+        "How often must Havenite residency documentation be renewed under CGC policy?"
+    )
+
+
+def test_clean_answer_removes_echoed_question_and_answer_prefix():
+    manager = _load_nlp_manager_module()
+
+    answer = manager._clean_answer(
+        "At what occasion was Wampa Robotics destroyed in 2070?",
+        "At what occasion was Wampa Robotics destroyed in 2070? Answer: In a ceremony.",
+    )
+
+    assert answer == "In a ceremony."
+
+
+def test_select_evidence_snippet_prefers_sentences_matching_question_terms():
+    manager = _load_nlp_manager_module()
+    text = (
+        "The casino opened under a provisional licence. "
+        "Caulfield's Casino is registered under Class III permit SH-EV-00714. "
+        "A later food inspection found no violations."
+    )
+
+    snippet = manager._select_evidence_snippet(
+        "Under what license class and permit number is Caulfield's Casino registered?",
+        text,
+    )
+
+    assert snippet == "Caulfield's Casino is registered under Class III permit SH-EV-00714."

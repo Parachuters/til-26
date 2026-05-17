@@ -1,5 +1,6 @@
 """Manages the NLP model."""
 
+import json
 import os
 import re
 import threading
@@ -50,6 +51,7 @@ UNANSWERABLE_THRESHOLD = float(os.getenv("NLP_UNANSWERABLE_THRESHOLD", "0.35"))
 TOP_K = int(os.getenv("NLP_TOP_K", "40"))   # retrieve more candidates before reranking
 RERANK_TOP_K = int(os.getenv("NLP_RERANK_TOP_K", "20"))
 MAX_NEW_TOKENS = int(os.getenv("NLP_MAX_NEW_TOKENS", "64"))
+VERIFIER_MAX_NEW_TOKENS = int(os.getenv("NLP_VERIFIER_MAX_NEW_TOKENS", "128"))
 CHUNK_WORDS = int(os.getenv("NLP_CHUNK_WORDS", "420"))
 OVERLAP_WORDS = int(os.getenv("NLP_OVERLAP_WORDS", "80"))
 EMBED_BATCH_SIZE = int(os.getenv("NLP_EMBED_BATCH_SIZE", "128"))
@@ -62,26 +64,7 @@ BGE_QUERY_INSTRUCTION = (
 )
 _TOKEN_RE = re.compile(r"\b\w+\b", flags=re.UNICODE)
 _SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)", flags=re.UNICODE)
-_EXTERNAL_L4_RE = re.compile(
-    r"\b(as of|q[1-4]|december)\s+(?:q[1-4]\s+)?20\d{2}\b|\b20\d{2}\b",
-    flags=re.IGNORECASE,
-)
-_REAL_WORLD_TERMS_RE = re.compile(
-    r"\b("
-    r"fda|spacex|falcon\s+9|microsoft|samsung|paris\s+agreement|"
-    r"european\s+space\s+agency|international\s+maritime\s+organization|"
-    r"jebel\s+ali|dubai"
-    r")\b",
-    flags=re.IGNORECASE,
-)
-_MISSING_INFO_RE = re.compile(
-    r"\b("
-    r"not specified|not stated|not provided|not mentioned|does not mention|"
-    r"cannot be determined|insufficient information|no evidence|no chairperson|"
-    r"no tie-breaking"
-    r")\b",
-    flags=re.IGNORECASE,
-)
+_VALID_VERIFIER_STATUSES = {"answerable", "false_premise", "insufficient_info"}
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "did", "does", "for",
     "from", "given", "had", "has", "have", "how", "if", "in", "is", "it",
@@ -123,11 +106,6 @@ def _format_embed_query(question: str) -> str:
     return f"{BGE_QUERY_INSTRUCTION}{question}"
 
 
-def _looks_like_external_l4(question: str) -> bool:
-    """Detect obvious out-of-world current-events questions used for L4."""
-    return bool(_EXTERNAL_L4_RE.search(question) and _REAL_WORLD_TERMS_RE.search(question))
-
-
 def _content_words(text: str) -> set[str]:
     return {
         token
@@ -162,10 +140,8 @@ def _select_evidence_snippet(
 
 
 def _clean_answer(question: str, answer: str) -> str:
-    """Normalize generator output for the ModernBERT equivalence scorer."""
+    """Remove answer formatting without making semantic unanswerable decisions."""
     cleaned = answer.strip().strip('"')
-    if "UNANSWERABLE" in cleaned.upper():
-        return "UNANSWERABLE"
 
     escaped_question = re.escape(question.strip())
     cleaned = re.sub(
@@ -178,10 +154,43 @@ def _clean_answer(question: str, answer: str) -> str:
     cleaned = re.sub(r"^The answer is\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*\[[^\]]+\]\s*", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    if _MISSING_INFO_RE.search(cleaned):
-        return "UNANSWERABLE"
     return cleaned
+
+
+def _default_verifier_result(
+    reason: str = "Verifier output could not be trusted.",
+) -> dict[str, str]:
+    return {"status": "insufficient_info", "evidence_quote": "", "reason": reason}
+
+
+def _parse_verifier_json(text: str) -> dict[str, str]:
+    """Parse and validate the verifier's strict JSON response."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return _default_verifier_result("No JSON object found.")
+
+    try:
+        parsed = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return _default_verifier_result("Invalid JSON.")
+
+    if not isinstance(parsed, dict):
+        return _default_verifier_result("JSON output was not an object.")
+
+    status = str(parsed.get("status", "")).strip().lower()
+    evidence_quote = str(parsed.get("evidence_quote", "")).strip()
+    reason = str(parsed.get("reason", "")).strip()
+    if status not in _VALID_VERIFIER_STATUSES:
+        return _default_verifier_result("Invalid verifier status.")
+    if status == "answerable" and not evidence_quote:
+        return _default_verifier_result("Answerable status lacked an evidence quote.")
+
+    return {
+        "status": status,
+        "evidence_quote": evidence_quote,
+        "reason": reason,
+    }
 
 
 def _chunk_documents(
@@ -317,16 +326,19 @@ class NLPManager:
             L4 (no relevant docs): both empty.
             L5 (false premise): documents populated, answer empty.
         """
-        if _looks_like_external_l4(question):
-            return {"documents": [], "answer": ""}
-
         # --- Step 1: Hybrid retrieval (dense + BM25) ---
         q_emb = self.embedder.encode(
             [_format_embed_query(question)],
             normalize_embeddings=True,
         )
         scores, indices = self.index.search(q_emb.astype(np.float32), TOP_K)
-        dense_ranked = [int(i) for i in indices[0]]
+        dense_ranked = [int(i) for i in indices[0] if int(i) >= 0]
+        if not dense_ranked:
+            return {"documents": [], "answer": ""}
+
+        max_dense_score = float(scores[0][0])
+        if max_dense_score < UNANSWERABLE_THRESHOLD:
+            return {"documents": [], "answer": ""}
 
         if self.bm25 is not None:
             bm25_scores = self.bm25.get_scores(_tokenize_for_sparse(question))
@@ -335,10 +347,7 @@ class NLPManager:
         else:
             combined = dense_ranked
         combined = combined[:RERANK_TOP_K]
-
-        # L4 guard: if the top dense score is below threshold, declare unanswerable
-        max_dense_score = float(scores[0][0])
-        if max_dense_score < UNANSWERABLE_THRESHOLD:
+        if not combined:
             return {"documents": [], "answer": ""}
 
         # --- Step 2: Rerank with cross-encoder ---
@@ -361,26 +370,117 @@ class NLPManager:
             if len(top3_ids) == 3:
                 break
 
-        # --- Step 3: Generate answer ---
+        if not top3_ids:
+            return {"documents": [], "answer": ""}
+
+        # --- Step 3: Verify evidence before generating an answer ---
         context = "\n\n".join(
             f"[{doc_id}]: {_select_evidence_snippet(question, text, max_sentences=3)}"
             for doc_id, text in zip(top3_ids, top3_texts)
         )
-        answer = self._generate_answer(question, context)
+        verifier = self._verify_evidence(
+            question,
+            context,
+            {
+                "max_dense_score": max_dense_score,
+                "top_rerank_score": (
+                    float(np.max(rerank_scores)) if len(rerank_scores) else 0.0
+                ),
+                "candidate_count": len(combined),
+            },
+        )
+        if verifier["status"] == "false_premise":
+            return {"documents": top3_ids, "answer": ""}
+        if verifier["status"] == "insufficient_info":
+            return {"documents": top3_ids, "answer": ""}
+
+        # --- Step 4: Generate answer from verified evidence ---
+        answer = self._generate_answer(question, context, verifier["evidence_quote"])
         answer = _clean_answer(question, answer)
 
-        # L5: false premise detected by LLM — return doc IDs for partial credit
-        if "UNANSWERABLE" in answer.upper():
+        if answer.upper() == "UNANSWERABLE":
             return {"documents": top3_ids, "answer": ""}
 
         return {"documents": top3_ids, "answer": answer}
 
-    def _generate_answer(self, question: str, context: str) -> str:
+    def _verify_evidence(
+        self,
+        question: str,
+        context: str,
+        retrieval_signals: dict[str, float | int],
+    ) -> dict[str, str]:
+        """Ask the LLM whether retrieved snippets answer the exact question."""
         self._ensure_llm()
         user_content = (
-            f"Documents:\n{context}\n\nQuestion: {question}\n"
-            "Return only the final answer text, or exactly UNANSWERABLE. "
-            "Do not repeat the question.\nAnswer:"
+            "Decide whether the context answers the exact question. "
+            "Use only the context, not outside knowledge.\n\n"
+            "Return only JSON with this shape:\n"
+            '{"status":"answerable|false_premise|insufficient_info",'
+            '"evidence_quote":"Exact sentence from context or empty string",'
+            '"reason":"One short sentence"}\n\n'
+            "Status rules:\n"
+            "- answerable: the context directly answers every part of the question. "
+            "evidence_quote must be an exact quote from the context.\n"
+            "- false_premise: the context is relevant and contradicts a premise in the question.\n"
+            "- insufficient_info: context is unrelated or lacks the specific answer.\n\n"
+            "Example 1\n"
+            "Question: How often are Haven permits renewed?\n"
+            "Context: [D1]: Haven permits are renewed annually by the CGC.\n"
+            "JSON: {\"status\":\"answerable\","
+            "\"evidence_quote\":\"Haven permits are renewed annually by the CGC.\","
+            "\"reason\":\"The quote gives the renewal frequency.\"}\n\n"
+            "Example 2\n"
+            "Question: Which blue permit did the CGC cite for the harbour?\n"
+            "Context: [D2]: The CGC cited a red harbour permit. No blue permit was issued.\n"
+            "JSON: {\"status\":\"false_premise\","
+            "\"evidence_quote\":\"No blue permit was issued.\","
+            "\"reason\":\"The context contradicts the requested blue permit.\"}\n\n"
+            "Example 3\n"
+            "Question: Who signed the alternate harbour permit?\n"
+            "Context: [D3]: The harbour memo described inspection routes.\n"
+            "JSON: {\"status\":\"insufficient_info\",\"evidence_quote\":\"\",\"reason\":\"The signer is not stated.\"}\n\n"
+            f"Retrieval signals: {json.dumps(retrieval_signals, sort_keys=True)}\n"
+            f"Question: {question}\n"
+            f"Context:\n{context}\n"
+            "JSON:"
+        )
+        messages = [
+            {"role": "system", "content": "You are a strict evidence verifier."},
+            {"role": "user", "content": user_content},
+        ]
+        text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.tokenizer([text], return_tensors="pt").to(self.llm.device)
+        with torch.no_grad():
+            output = self.llm.generate(
+                **inputs,
+                max_new_tokens=VERIFIER_MAX_NEW_TOKENS,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        new_tokens = output[0][inputs["input_ids"].shape[1]:]
+        verifier_text = self.tokenizer.decode(
+            new_tokens,
+            skip_special_tokens=True,
+        ).strip()
+        return _parse_verifier_json(verifier_text)
+
+    def _generate_answer(
+        self,
+        question: str,
+        context: str,
+        evidence_quote: str = "",
+    ) -> str:
+        self._ensure_llm()
+        user_content = (
+            f"Verified evidence quote:\n{evidence_quote}\n\n"
+            f"Supporting snippets:\n{context}\n\n"
+            f"Question: {question}\n"
+            "Return only the shortest correct answer phrase. "
+            "Do not repeat the question and do not include citations.\nAnswer:"
         )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

@@ -49,9 +49,8 @@ RERANKER_MODEL = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-base")
 LLM_MODEL = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 UNANSWERABLE_THRESHOLD = float(os.getenv("NLP_UNANSWERABLE_THRESHOLD", "0.35"))
 MIN_BM25_RELEVANCE = float(os.getenv("NLP_MIN_BM25_RELEVANCE", "3.0"))
-TOP_K = int(os.getenv("NLP_TOP_K", "40"))   # retrieve more candidates before reranking
-RERANK_TOP_K = int(os.getenv("NLP_RERANK_TOP_K", "20"))
-MAX_NEW_TOKENS = int(os.getenv("NLP_MAX_NEW_TOKENS", "64"))
+TOP_K = int(os.getenv("NLP_TOP_K", "24"))   # retrieve more candidates before reranking
+RERANK_TOP_K = int(os.getenv("NLP_RERANK_TOP_K", "8"))
 VERIFIER_MAX_NEW_TOKENS = int(os.getenv("NLP_VERIFIER_MAX_NEW_TOKENS", "128"))
 CHUNK_WORDS = int(os.getenv("NLP_CHUNK_WORDS", "420"))
 OVERLAP_WORDS = int(os.getenv("NLP_OVERLAP_WORDS", "80"))
@@ -532,6 +531,17 @@ def _default_verifier_result(
     return {"status": "insufficient_info", "evidence_quote": "", "reason": reason}
 
 
+def _default_qa_result(
+    reason: str = "QA output could not be trusted.",
+) -> dict[str, str]:
+    return {
+        "status": "insufficient_info",
+        "evidence_quote": "",
+        "answer": "",
+        "reason": reason,
+    }
+
+
 def _parse_verifier_json(text: str) -> dict[str, str]:
     """Parse and validate the verifier's strict JSON response."""
     start = text.find("{")
@@ -558,6 +568,43 @@ def _parse_verifier_json(text: str) -> dict[str, str]:
     return {
         "status": status,
         "evidence_quote": evidence_quote,
+        "reason": reason,
+    }
+
+
+def _parse_qa_json(text: str) -> dict[str, str]:
+    """Parse and validate the combined QA model's strict JSON response."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return _default_qa_result("No JSON object found.")
+
+    try:
+        parsed = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return _default_qa_result("Invalid JSON.")
+
+    if not isinstance(parsed, dict):
+        return _default_qa_result("JSON output was not an object.")
+
+    status = str(parsed.get("status", "")).strip().lower()
+    evidence_quote = str(parsed.get("evidence_quote", "")).strip()
+    answer = str(parsed.get("answer", "")).strip()
+    reason = str(parsed.get("reason", "")).strip()
+
+    if status not in _VALID_VERIFIER_STATUSES:
+        return _default_qa_result("Invalid QA status.")
+    if status == "answerable" and (not evidence_quote or not answer):
+        return _default_qa_result("Answerable status lacked evidence or answer.")
+    if status != "answerable":
+        answer = ""
+        if status == "insufficient_info":
+            evidence_quote = ""
+
+    return {
+        "status": status,
+        "evidence_quote": evidence_quote,
+        "answer": answer,
         "reason": reason,
     }
 
@@ -769,12 +816,12 @@ class NLPManager:
         if not top3_ids:
             return {"documents": [], "answer": ""}
 
-        # --- Step 3: Verify evidence before generating an answer ---
+        # --- Step 3: Answer and verify evidence in one compact LLM call ---
         context = "\n\n".join(
             f"[{doc_id}]: {_select_evidence_snippet(question, text, max_sentences=3)}"
             for doc_id, text in zip(top3_ids, top3_texts)
         )
-        verifier = self._verify_evidence(
+        qa_result = self._answer_from_evidence(
             question,
             context,
             {
@@ -787,12 +834,11 @@ class NLPManager:
                 "candidate_count": len(combined),
             },
         )
-        support_decision = _verify_question_support(question, context, verifier)
+        support_decision = _verify_question_support(question, context, qa_result)
         if support_decision == "contradicted_or_unsupported":
             return {"documents": top3_ids, "answer": ""}
 
-        # --- Step 4: Generate answer from verified evidence ---
-        answer = self._generate_answer(question, context, verifier["evidence_quote"])
+        answer = qa_result.get("answer", "")
         answer = _clean_answer(question, answer)
 
         if answer.upper() == "UNANSWERABLE":
@@ -800,52 +846,36 @@ class NLPManager:
 
         return {"documents": top3_ids, "answer": answer}
 
-    def _verify_evidence(
+    def _answer_from_evidence(
         self,
         question: str,
         context: str,
         retrieval_signals: dict[str, float | int],
     ) -> dict[str, str]:
-        """Ask the LLM whether retrieved snippets answer the exact question."""
+        """Return answerability, evidence, and answer in one generation."""
         self._ensure_llm()
         user_content = (
-            "Decide whether the context answers the exact question. "
-            "Use only the context, not outside knowledge.\n\n"
+            "Use only the context to answer the exact question. "
             "Return only JSON with this shape:\n"
             '{"status":"answerable|false_premise|insufficient_info",'
             '"evidence_quote":"Exact sentence from context or empty string",'
+            '"answer":"Shortest correct answer phrase or empty string",'
             '"reason":"One short sentence"}\n\n'
-            "Status rules:\n"
-            "- In-universe jargon, code names, corporations, places, and slang "
-            "are valid evidence terms; preserve them exactly and do not "
-            "normalize them to real-world concepts.\n"
-            "- answerable: the context directly answers every part of the question. "
-            "evidence_quote must be an exact quote from the context.\n"
-            "- false_premise: the context is relevant and contradicts a premise in the question.\n"
-            "- insufficient_info: context is unrelated or lacks the specific answer.\n\n"
-            "Example 1\n"
-            "Question: How often are Haven permits renewed?\n"
-            "Context: [D1]: Haven permits are renewed annually by the CGC.\n"
-            "JSON: {\"status\":\"answerable\","
-            "\"evidence_quote\":\"Haven permits are renewed annually by the CGC.\","
-            "\"reason\":\"The quote gives the renewal frequency.\"}\n\n"
-            "Example 2\n"
-            "Question: Which blue permit did the CGC cite for the harbour?\n"
-            "Context: [D2]: The CGC cited a red harbour permit. No blue permit was issued.\n"
-            "JSON: {\"status\":\"false_premise\","
-            "\"evidence_quote\":\"No blue permit was issued.\","
-            "\"reason\":\"The context contradicts the requested blue permit.\"}\n\n"
-            "Example 3\n"
-            "Question: Who signed the alternate harbour permit?\n"
-            "Context: [D3]: The harbour memo described inspection routes.\n"
-            "JSON: {\"status\":\"insufficient_info\",\"evidence_quote\":\"\",\"reason\":\"The signer is not stated.\"}\n\n"
+            "Rules:\n"
+            "- answerable: every part of the question is answered by the context; "
+            "include an exact evidence_quote and the shortest answer.\n"
+            "- false_premise: relevant context contradicts a premise in the question; "
+            "leave answer empty.\n"
+            "- insufficient_info: context is unrelated or lacks the specific answer; "
+            "leave evidence_quote and answer empty.\n"
+            "- Preserve names, IDs, percentages, dates, and numbers exactly.\n\n"
             f"Retrieval signals: {json.dumps(retrieval_signals, sort_keys=True)}\n"
             f"Question: {question}\n"
             f"Context:\n{context}\n"
             "JSON:"
         )
         messages = [
-            {"role": "system", "content": "You are a strict evidence verifier."},
+            {"role": "system", "content": "You are a strict evidence-grounded QA system."},
             {"role": "user", "content": user_content},
         ]
         text = self.tokenizer.apply_chat_template(
@@ -862,42 +892,5 @@ class NLPManager:
                 pad_token_id=self.tokenizer.eos_token_id,
             )
         new_tokens = output[0][inputs["input_ids"].shape[1]:]
-        verifier_text = self.tokenizer.decode(
-            new_tokens,
-            skip_special_tokens=True,
-        ).strip()
-        return _parse_verifier_json(verifier_text)
-
-    def _generate_answer(
-        self,
-        question: str,
-        context: str,
-        evidence_quote: str = "",
-    ) -> str:
-        self._ensure_llm()
-        user_content = (
-            f"Verified evidence quote:\n{evidence_quote}\n\n"
-            f"Supporting snippets:\n{context}\n\n"
-            f"Question: {question}\n"
-            "Return only the shortest correct answer phrase. "
-            "Do not repeat the question and do not include citations.\nAnswer:"
-        )
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.tokenizer([text], return_tensors="pt").to(self.llm.device)
-        with torch.no_grad():
-            output = self.llm.generate(
-                **inputs,
-                max_new_tokens=MAX_NEW_TOKENS,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        new_tokens = output[0][inputs["input_ids"].shape[1]:]
-        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        qa_text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        return _parse_qa_json(qa_text)

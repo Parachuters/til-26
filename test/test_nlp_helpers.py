@@ -199,6 +199,40 @@ def test_parse_verifier_json_rejects_invalid_status_and_missing_answerable_quote
     assert manager._parse_verifier_json("not json")["status"] == "insufficient_info"
 
 
+def test_parse_qa_json_accepts_answerable_payload_inside_model_output():
+    manager = _load_nlp_manager_module()
+
+    parsed = manager._parse_qa_json(
+        '```json\n{"status":"answerable",'
+        '"evidence_quote":"The launch permit was renewed annually by the CGC.",'
+        '"answer":"annually","reason":"The quote gives the cadence."}\n```'
+    )
+
+    assert parsed == {
+        "status": "answerable",
+        "evidence_quote": "The launch permit was renewed annually by the CGC.",
+        "answer": "annually",
+        "reason": "The quote gives the cadence.",
+    }
+
+
+def test_parse_qa_json_rejects_invalid_payloads_to_empty_insufficient_info():
+    manager = _load_nlp_manager_module()
+
+    assert manager._parse_qa_json("not json") == {
+        "status": "insufficient_info",
+        "evidence_quote": "",
+        "answer": "",
+        "reason": "No JSON object found.",
+    }
+    assert manager._parse_qa_json(
+        '{"status":"answerable","evidence_quote":"","answer":"annually"}'
+    )["status"] == "insufficient_info"
+    assert manager._parse_qa_json(
+        '{"status":"insufficient_info","evidence_quote":"","answer":"annually"}'
+    )["answer"] == ""
+
+
 def test_clean_answer_removes_echoed_question_and_answer_prefix():
     manager = _load_nlp_manager_module()
 
@@ -385,7 +419,7 @@ class _FakeReranker:
 def _fake_loaded_manager(
     module,
     dense_score=0.8,
-    verifier_status="insufficient_info",
+    qa_status="insufficient_info",
     bm25_scores=None,
     lexicon=None,
 ):
@@ -401,20 +435,17 @@ def _fake_loaded_manager(
         "A related operating memo described harbour inspections.",
         "The public archive lists no alternate permit process.",
     ]
-    manager._verify_evidence = types.MethodType(
+    manager._answer_from_evidence = types.MethodType(
         lambda self, question, context, retrieval_signals: {
-            "status": verifier_status,
+            "status": qa_status,
             "evidence_quote": (
                 "The launch permit was renewed annually by the CGC."
-                if verifier_status == "answerable"
+                if qa_status == "answerable"
                 else ""
             ),
+            "answer": "annually" if qa_status == "answerable" else "",
             "reason": "test verifier",
         },
-        manager,
-    )
-    manager._generate_answer = types.MethodType(
-        lambda self, question, context, evidence_quote="": "annually",
         manager,
     )
     return manager
@@ -422,7 +453,7 @@ def _fake_loaded_manager(
 
 def test_qa_false_premise_returns_top_docs_with_empty_answer():
     module = _load_nlp_manager_module()
-    manager = _fake_loaded_manager(module, verifier_status="false_premise")
+    manager = _fake_loaded_manager(module, qa_status="false_premise")
 
     result = manager.qa("Which non-existent alternate permit did the CGC cite?")
 
@@ -432,9 +463,9 @@ def test_qa_false_premise_returns_top_docs_with_empty_answer():
 def test_qa_weak_retrieval_returns_empty_docs_without_verifier_call():
     module = _load_nlp_manager_module()
     manager = _fake_loaded_manager(module, dense_score=0.1)
-    manager._verify_evidence = types.MethodType(
+    manager._answer_from_evidence = types.MethodType(
         lambda self, question, context, retrieval_signals: (_ for _ in ()).throw(
-            AssertionError("verifier should not run for weak retrieval")
+            AssertionError("LLM answer should not run for weak retrieval")
         ),
         manager,
     )
@@ -447,9 +478,9 @@ def test_qa_weak_retrieval_returns_empty_docs_without_verifier_call():
 def test_qa_external_l4_question_returns_empty_docs_without_verifier_call():
     module = _load_nlp_manager_module()
     manager = _fake_loaded_manager(module, dense_score=0.8)
-    manager._verify_evidence = types.MethodType(
+    manager._answer_from_evidence = types.MethodType(
         lambda self, question, context, retrieval_signals: (_ for _ in ()).throw(
-            AssertionError("verifier should not run for external L4 questions")
+            AssertionError("LLM answer should not run for external L4 questions")
         ),
         manager,
     )
@@ -471,7 +502,7 @@ def test_qa_low_dense_score_continues_when_bm25_entity_evidence_is_strong():
     manager = _fake_loaded_manager(
         module,
         dense_score=0.1,
-        verifier_status="answerable",
+        qa_status="answerable",
         bm25_scores=[8.0, 0.0, 0.0],
         lexicon=lexicon,
     )
@@ -482,12 +513,12 @@ def test_qa_low_dense_score_continues_when_bm25_entity_evidence_is_strong():
     assert "sh-ev-00714" in manager.bm25.queries[0]
 
 
-def test_qa_strong_insufficient_info_still_generates_answer():
+def test_qa_answerable_combined_result_returns_clean_answer():
     module = _load_nlp_manager_module()
     manager = _fake_loaded_manager(
         module,
         dense_score=0.8,
-        verifier_status="insufficient_info",
+        qa_status="answerable",
     )
 
     result = manager.qa("Which launch permit did the CGC renew?")
@@ -500,7 +531,7 @@ def test_qa_unsupported_insufficient_info_returns_empty_answer():
     manager = _fake_loaded_manager(
         module,
         dense_score=0.8,
-        verifier_status="insufficient_info",
+        qa_status="insufficient_info",
     )
 
     result = manager.qa(
@@ -508,3 +539,37 @@ def test_qa_unsupported_insufficient_info_returns_empty_answer():
     )
 
     assert result == {"documents": ["DOC-1", "DOC-2", "DOC-3"], "answer": ""}
+
+
+def test_qa_uses_one_combined_llm_answer_method():
+    module = _load_nlp_manager_module()
+    manager = _fake_loaded_manager(module, qa_status="answerable")
+    calls = {"combined": 0}
+
+    def answer_once(self, question, context, retrieval_signals):
+        calls["combined"] += 1
+        return {
+            "status": "answerable",
+            "evidence_quote": "The launch permit was renewed annually by the CGC.",
+            "answer": "annually",
+            "reason": "test verifier",
+        }
+
+    manager._answer_from_evidence = types.MethodType(answer_once, manager)
+    manager._verify_evidence = types.MethodType(
+        lambda self, question, context, retrieval_signals: (_ for _ in ()).throw(
+            AssertionError("separate verifier should not be called")
+        ),
+        manager,
+    )
+    manager._generate_answer = types.MethodType(
+        lambda self, question, context, evidence_quote="": (_ for _ in ()).throw(
+            AssertionError("separate generator should not be called")
+        ),
+        manager,
+    )
+
+    result = manager.qa("Which launch permit did the CGC renew?")
+
+    assert result == {"documents": ["DOC-1", "DOC-2", "DOC-3"], "answer": "annually"}
+    assert calls == {"combined": 1}

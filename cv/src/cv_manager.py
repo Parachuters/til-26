@@ -20,9 +20,10 @@ IOU_THRESHOLD = float(os.getenv("CV_IOU_THRESHOLD", "0.6"))
 # 1280 gives substantially better small-object detection on the advanced track.
 # Override with CV_IMG_SIZE=640 if inference budget is tight.
 IMG_SIZE = int(os.getenv("CV_IMG_SIZE", "1280"))
-# Test-time augmentation (horizontal flip + multi-scale). Adds ~2x compute but
-# typically gains 2-3 mAP points. Disable with CV_TTA=0 if too slow.
-TTA = os.getenv("CV_TTA", "1") not in ("0", "false", "False", "no")
+# Test-time augmentation (horizontal flip + multi-scale) is accuracy-biased but
+# expensive. Keep it off by default to stay under the challenge speed threshold;
+# enable with CV_TTA=1 for accuracy-focused runs.
+TTA = os.getenv("CV_TTA", "0") not in ("0", "false", "False", "no")
 
 
 class CVManager:

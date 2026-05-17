@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Sources of Truth
+
+Use these references as the canonical context for challenge rules, submission requirements, and implementation details:
+
+- Project submission: https://tribegroup.notion.site/Project-Submission-33a5263ef45a80c3bad7d6006752cba4#33a5263ef45a81c9a4bce1c6c562a050
+- BrainHack 2026 TIL AI Strategist's Handbook: https://tribegroup.notion.site/BrainHack-2026-TIL-AI-Strategist-s-Handbook-33a5263ef45a80429a9dc47c569e40c3
+- TIL 2026 wiki: https://github.com/til-ai/til-26/wiki
+- TIL 2026 repository: https://github.com/til-ai/til-26
+
 ## Commands
 
 All commands below run on the GCP Workbench instance where the `til` CLI is pre-installed and training data lives at `/home/jupyter/{TEAM_TRACK}/`.

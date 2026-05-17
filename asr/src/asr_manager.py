@@ -114,7 +114,7 @@ class ASRManager:
             num_workers=num_workers,
             download_root=download_root,
         )
-        self.beam_size = int(os.getenv("ASR_BEAM_SIZE", "3"))
+        self.beam_size = int(os.getenv("ASR_BEAM_SIZE", "1"))
         self.min_silence_duration_ms = int(
             os.getenv("ASR_MIN_SILENCE_DURATION_MS", "500")
         )

@@ -94,6 +94,19 @@ _REAL_WORLD_TERMS_RE = re.compile(
     r")\b",
     flags=re.IGNORECASE,
 )
+_NUMERIC_CLAIM_RE = re.compile(
+    r"\bq[1-4]\b|\b\d+(?:\.\d+)?%|\b\d{1,4}(?:st|nd|rd|th)?\b",
+    flags=re.IGNORECASE,
+)
+_SUPPORT_MARKER_PATTERNS = {
+    "other than": re.compile(r"\bother\s+than\b", flags=re.IGNORECASE),
+    "except": re.compile(r"\bexcept\b", flags=re.IGNORECASE),
+    "excluding": re.compile(r"\bexclud(?:e|ed|ing|es)\b", flags=re.IGNORECASE),
+    "not": re.compile(r"\bnot\b", flags=re.IGNORECASE),
+    "no": re.compile(r"\bno\b", flags=re.IGNORECASE),
+    "without": re.compile(r"\bwithout\b", flags=re.IGNORECASE),
+    "given that": re.compile(r"\bgiven\s+that\b", flags=re.IGNORECASE),
+}
 _VALID_VERIFIER_STATUSES = {"answerable", "false_premise", "insufficient_info"}
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "did", "does", "for",
@@ -101,6 +114,49 @@ _STOPWORDS = {
     "of", "on", "or", "that", "the", "their", "this", "to", "under", "was",
     "were", "what", "when", "where", "which", "who", "why", "with",
 }
+_ENTITY_STOPWORDS = _STOPWORDS.union(
+    {
+        "answer",
+        "context",
+        "doc",
+        "doc-1",
+        "doc-2",
+        "doc-3",
+        "document",
+        "exact",
+        "final",
+        "json",
+        "other",
+        "question",
+    }
+)
+_GENERIC_SUPPORT_WORDS = _STOPWORDS.union(
+    {
+        "answer",
+        "article",
+        "body",
+        "breach",
+        "built",
+        "candidate",
+        "cite",
+        "cited",
+        "classified",
+        "context",
+        "credit",
+        "doc",
+        "document",
+        "evidence",
+        "given",
+        "launch",
+        "permit",
+        "question",
+        "regulatory",
+        "report",
+        "type",
+        "types",
+        "vessel",
+    }
+)
 
 # System prompt grounded in the Clairos fictional setting so the LLM does not
 # confuse in-world terminology with real-world knowledge.
@@ -172,6 +228,157 @@ def _content_words(text: str) -> set[str]:
 
 def _normalise_entity(term: str) -> str:
     return re.sub(r"\s+", " ", term.strip().strip("\"'.,:;()[]{}")).lower()
+
+
+def _clean_salient_entity(term: str) -> str:
+    words = term.strip().strip("\"'.,:;()[]{}").split()
+    while words and (
+        words[0].lower() in _STOPWORDS
+        or (words[0] and words[0][0].islower())
+    ):
+        words.pop(0)
+    while words and (
+        words[-1].lower() in _STOPWORDS
+        or (words[-1] and words[-1][0].islower())
+    ):
+        words.pop()
+    return _normalise_entity(" ".join(words))
+
+
+def _claim_words(text: str) -> set[str]:
+    return {
+        token
+        for token in _content_words(text)
+        if token not in _GENERIC_SUPPORT_WORDS and not token.startswith("doc-")
+    }
+
+
+def _extract_salient_claims(text: str) -> dict[str, set[str]]:
+    """Extract conservative question/evidence claims used by the support gate."""
+    entities: set[str] = set()
+    quoted = {
+        _normalise_entity(match.group(1))
+        for match in _QUOTED_TERM_RE.finditer(text)
+        if _normalise_entity(match.group(1))
+    }
+
+    for term, _, _ in _extract_entity_candidates(text):
+        entity = _clean_salient_entity(term)
+        if not entity or entity in _ENTITY_STOPWORDS:
+            continue
+        if entity.startswith("doc-") or entity.isdigit():
+            continue
+        if all(part in _ENTITY_STOPWORDS for part in entity.split()):
+            continue
+        entities.add(entity)
+
+    entities = {
+        entity
+        for entity in entities
+        if not any(
+            entity != other and re.search(rf"\b{re.escape(entity)}\b", other)
+            for other in entities
+        )
+    }
+
+    numbers = {
+        match.group(0).lower()
+        for match in _NUMERIC_CLAIM_RE.finditer(text)
+    }
+    markers = {
+        marker
+        for marker, pattern in _SUPPORT_MARKER_PATTERNS.items()
+        if pattern.search(text)
+    }
+
+    return {
+        "entities": entities,
+        "quoted": quoted,
+        "numbers": numbers,
+        "markers": markers,
+        "words": _claim_words(text),
+    }
+
+
+def _has_strong_claim_overlap(
+    question_claims: dict[str, set[str]],
+    context_claims: dict[str, set[str]],
+) -> bool:
+    for key in ("entities", "quoted", "numbers", "words"):
+        if question_claims[key].intersection(context_claims[key]):
+            return True
+    return False
+
+
+def _has_negated_overlapping_evidence(
+    question_claims: dict[str, set[str]],
+    context: str,
+) -> bool:
+    for match in _SENTENCE_RE.finditer(context):
+        sentence = match.group(0).strip()
+        if not sentence:
+            continue
+        sentence_claims = _extract_salient_claims(sentence)
+        if (
+            sentence_claims["markers"].intersection({"not", "no", "without"})
+            and _has_strong_claim_overlap(question_claims, sentence_claims)
+        ):
+            return True
+    return False
+
+
+def _verify_question_support(
+    question: str,
+    context: str,
+    verifier: dict[str, str],
+) -> str:
+    """Return supported, contradicted_or_unsupported, or unknown."""
+    status = verifier.get("status", "insufficient_info")
+    if status == "false_premise":
+        return "contradicted_or_unsupported"
+    if status == "answerable":
+        return "supported"
+    if status != "insufficient_info":
+        return "unknown"
+
+    question_claims = _extract_salient_claims(question)
+    context_claims = _extract_salient_claims(context)
+    missing_entities = question_claims["entities"] - context_claims["entities"]
+    missing_numbers = question_claims["numbers"] - context_claims["numbers"]
+
+    if missing_entities or missing_numbers:
+        return "contradicted_or_unsupported"
+
+    excluded_entities = set()
+    other_than = re.search(
+        r"\bother\s+than\s+([A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)",
+        question,
+    )
+    if other_than:
+        excluded_entities.add(_normalise_entity(other_than.group(1)))
+
+    asks_exception = bool(
+        question_claims["markers"].intersection({"other than", "except", "excluding"})
+    )
+    if asks_exception:
+        candidate_entities = context_claims["entities"] - excluded_entities
+        if not candidate_entities:
+            return "contradicted_or_unsupported"
+
+    negation_markers = {"not", "no", "without"}
+    if (
+        _has_negated_overlapping_evidence(question_claims, context)
+        and not question_claims["markers"].intersection(negation_markers)
+    ):
+        return "contradicted_or_unsupported"
+
+    if (
+        not verifier.get("evidence_quote", "").strip()
+        and not _has_strong_claim_overlap(question_claims, context_claims)
+    ):
+        return "contradicted_or_unsupported"
+
+    return "unknown"
 
 
 def _entity_context(text: str, start: int, end: int, max_chars: int = 160) -> str:
@@ -580,7 +787,8 @@ class NLPManager:
                 "candidate_count": len(combined),
             },
         )
-        if verifier["status"] == "false_premise":
+        support_decision = _verify_question_support(question, context, verifier)
+        if support_decision == "contradicted_or_unsupported":
             return {"documents": top3_ids, "answer": ""}
 
         # --- Step 4: Generate answer from verified evidence ---

@@ -221,6 +221,114 @@ def test_clean_answer_only_removes_formatting_not_semantic_content():
     assert answer == "The document does not mention an alternate permit."
 
 
+def test_extract_salient_claims_finds_entities_numbers_quotes_and_markers():
+    manager = _load_nlp_manager_module()
+
+    claims = manager._extract_salient_claims(
+        "Other than TEC, which CGC report quoted 'red harbour permit' at 17.5% in Q4 2076?"
+    )
+
+    assert {"tec", "cgc"}.issubset(claims["entities"])
+    assert "red harbour permit" in claims["quoted"]
+    assert {"17.5%", "q4", "2076"}.issubset(claims["numbers"])
+    assert "other than" in claims["markers"]
+
+
+def test_extract_salient_claims_drops_question_prefix_from_entity():
+    manager = _load_nlp_manager_module()
+
+    claims = manager._extract_salient_claims(
+        "What motivated Phyrexis Group to publicly claim credit?"
+    )
+
+    assert "phyrexis group" in claims["entities"]
+    assert "what motivated phyrexis group" not in claims["entities"]
+
+    yes_no_claims = manager._extract_salient_claims(
+        "Did Phyrexis Group publicly claim credit?"
+    )
+
+    assert "phyrexis group" in yes_no_claims["entities"]
+    assert "did phyrexis group" not in yes_no_claims["entities"]
+    assert "phyrexis" not in yes_no_claims["entities"]
+
+
+def test_verify_question_support_false_premise_always_vetoes_answer():
+    manager = _load_nlp_manager_module()
+
+    decision = manager._verify_question_support(
+        "Which non-existent alternate permit did the CGC cite?",
+        "[DOC-1]: The CGC cited SH-EV-00714.",
+        {"status": "false_premise", "evidence_quote": "", "reason": "test"},
+    )
+
+    assert decision == "contradicted_or_unsupported"
+
+
+def test_verify_question_support_vetoes_unsupported_required_entity():
+    manager = _load_nlp_manager_module()
+
+    decision = manager._verify_question_support(
+        "Which regulatory body other than TEC classified the breach?",
+        "[DOC-1]: TEC classified the breach after the audit.",
+        {"status": "insufficient_info", "evidence_quote": "", "reason": "test"},
+    )
+
+    assert decision == "contradicted_or_unsupported"
+
+
+def test_verify_question_support_vetoes_unsupported_required_number():
+    manager = _load_nlp_manager_module()
+
+    decision = manager._verify_question_support(
+        "Which permit was renewed in 2077?",
+        "[DOC-1]: SH-EV-00714 was renewed in 2076 by the CGC.",
+        {"status": "insufficient_info", "evidence_quote": "", "reason": "test"},
+    )
+
+    assert decision == "contradicted_or_unsupported"
+
+
+def test_verify_question_support_vetoes_negated_evidence_for_positive_premise():
+    manager = _load_nlp_manager_module()
+
+    decision = manager._verify_question_support(
+        "Did Phyrexis Group publicly claim credit for funding the event?",
+        "[DOC-1]: Phyrexis Group made no public claim of credit for the event.",
+        {"status": "insufficient_info", "evidence_quote": "", "reason": "test"},
+    )
+
+    assert decision == "contradicted_or_unsupported"
+
+
+def test_verify_question_support_keeps_answerable_overlap_unknown():
+    manager = _load_nlp_manager_module()
+
+    decision = manager._verify_question_support(
+        "Which permit did the CGC renew?",
+        "[DOC-1]: The CGC renewed SH-EV-00714 annually.",
+        {"status": "insufficient_info", "evidence_quote": "", "reason": "test"},
+    )
+
+    assert decision == "unknown"
+
+
+def test_verify_question_support_marks_answerable_as_supported():
+    manager = _load_nlp_manager_module()
+
+    decision = manager._verify_question_support(
+        "Which permit did the CGC renew?",
+        "[DOC-1]: The CGC renewed SH-EV-00714 annually.",
+        {
+            "status": "answerable",
+            "evidence_quote": "The CGC renewed SH-EV-00714 annually.",
+            "reason": "test",
+        },
+    )
+
+    assert decision == "supported"
+
+
 def test_select_evidence_snippet_prefers_sentences_matching_question_terms():
     manager = _load_nlp_manager_module()
     text = (
@@ -382,6 +490,21 @@ def test_qa_strong_insufficient_info_still_generates_answer():
         verifier_status="insufficient_info",
     )
 
-    result = manager.qa("Which alternate permit was cited?")
+    result = manager.qa("Which launch permit did the CGC renew?")
 
     assert result == {"documents": ["DOC-1", "DOC-2", "DOC-3"], "answer": "annually"}
+
+
+def test_qa_unsupported_insufficient_info_returns_empty_answer():
+    module = _load_nlp_manager_module()
+    manager = _fake_loaded_manager(
+        module,
+        dense_score=0.8,
+        verifier_status="insufficient_info",
+    )
+
+    result = manager.qa(
+        "Which vessel type was built at the yard, given that one was a frigate?"
+    )
+
+    assert result == {"documents": ["DOC-1", "DOC-2", "DOC-3"], "answer": ""}

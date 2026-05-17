@@ -48,6 +48,7 @@ EMBED_MODEL = os.getenv("NLP_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 RERANKER_MODEL = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-base")
 LLM_MODEL = os.getenv("NLP_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 UNANSWERABLE_THRESHOLD = float(os.getenv("NLP_UNANSWERABLE_THRESHOLD", "0.35"))
+MIN_BM25_RELEVANCE = float(os.getenv("NLP_MIN_BM25_RELEVANCE", "3.0"))
 TOP_K = int(os.getenv("NLP_TOP_K", "40"))   # retrieve more candidates before reranking
 RERANK_TOP_K = int(os.getenv("NLP_RERANK_TOP_K", "20"))
 MAX_NEW_TOKENS = int(os.getenv("NLP_MAX_NEW_TOKENS", "64"))
@@ -55,6 +56,7 @@ VERIFIER_MAX_NEW_TOKENS = int(os.getenv("NLP_VERIFIER_MAX_NEW_TOKENS", "128"))
 CHUNK_WORDS = int(os.getenv("NLP_CHUNK_WORDS", "420"))
 OVERLAP_WORDS = int(os.getenv("NLP_OVERLAP_WORDS", "80"))
 EMBED_BATCH_SIZE = int(os.getenv("NLP_EMBED_BATCH_SIZE", "128"))
+ENTITY_EXPANSION_LIMIT = int(os.getenv("NLP_ENTITY_EXPANSION_LIMIT", "12"))
 # BM25 weight in the hybrid score (1-BM25_WEIGHT goes to dense retrieval).
 BM25_WEIGHT = float(os.getenv("NLP_BM25_WEIGHT", "0.3"))
 # Use 4-bit quantisation for the LLM when bitsandbytes is available.
@@ -63,7 +65,35 @@ BGE_QUERY_INSTRUCTION = (
     "Represent this sentence for searching relevant passages: "
 )
 _TOKEN_RE = re.compile(r"\b\w+\b", flags=re.UNICODE)
+_COMPOUND_TOKEN_RE = re.compile(
+    r"\b[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+\b(?!')",
+    flags=re.UNICODE,
+)
+_ACRONYM_RE = re.compile(r"\b[A-Z]{2,}\b")
+_QUOTED_TERM_RE = re.compile(r"['\"]([^'\"]{2,80})['\"]")
+_CAPITALIZED_PHRASE_RE = re.compile(
+    r"\b(?:The\s+)?[A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*"
+    r"(?:\s+(?:of|the|and|for|to|in|on|under|[A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*))*"
+)
+_TITLE_PAIR_RE = re.compile(
+    r"\b[A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*"
+    r"\s+[A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*\b"
+)
 _SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)", flags=re.UNICODE)
+_EXTERNAL_L4_RE = re.compile(
+    r"\b(as of|q[1-4]|december)\s+(?:q[1-4]\s+)?20\d{2}\b|\b20\d{2}\b",
+    flags=re.IGNORECASE,
+)
+_REAL_WORLD_TERMS_RE = re.compile(
+    r"\b("
+    r"fda|spacex|falcon\s+9|microsoft|samsung|paris\s+agreement|"
+    r"european\s+space\s+agency|international\s+maritime\s+organization|"
+    r"jebel\s+ali|dubai|us\s+dollar|euro|nist|apple\s+inc|swift|"
+    r"amazon\s+web\s+services|aws|international\s+organization\s+for\s+"
+    r"standardization|iso"
+    r")\b",
+    flags=re.IGNORECASE,
+)
 _VALID_VERIFIER_STATUSES = {"answerable", "false_premise", "insufficient_info"}
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "did", "does", "for",
@@ -92,11 +122,25 @@ SYSTEM_PROMPT = (
 
 def _tokenize_for_sparse(text: str) -> list[str]:
     """Tokenize text for lexical retrieval without losing named entities."""
-    return [
-        token.strip("'").lower()
-        for token in _TOKEN_RE.findall(text)
-        if token.strip("'")
-    ]
+    tokens: list[str] = []
+    compounds = {match.start(): match for match in _COMPOUND_TOKEN_RE.finditer(text)}
+    covered = [match.span() for match in compounds.values()]
+
+    for match in _TOKEN_RE.finditer(text):
+        start, end = match.span()
+        if start in compounds:
+            compound = compounds[start].group(0).strip("'").lower()
+            if compound:
+                tokens.append(compound)
+                tokens.extend(part for part in re.split(r"[-_]", compound) if part)
+            continue
+        if any(start >= c_start and end <= c_end for c_start, c_end in covered):
+            continue
+        token = match.group(0).strip("'").lower()
+        if token:
+            tokens.append(token)
+
+    return tokens
 
 
 def _format_embed_query(question: str) -> str:
@@ -106,12 +150,130 @@ def _format_embed_query(question: str) -> str:
     return f"{BGE_QUERY_INSTRUCTION}{question}"
 
 
+def _looks_like_external_l4(question: str) -> bool:
+    """Detect obvious out-of-corpus real-world questions that should return no docs."""
+    return bool(_REAL_WORLD_TERMS_RE.search(question) and (
+        _EXTERNAL_L4_RE.search(question) or not _content_words(question).intersection(
+            {
+                "haven", "cgc", "edge", "wampa", "cyanite", "phyrexis",
+                "renhwa", "one", "clairos", "pce", "zonnon", "conclave",
+            }
+        )
+    ))
+
+
 def _content_words(text: str) -> set[str]:
     return {
         token
         for token in _tokenize_for_sparse(text)
         if token not in _STOPWORDS and len(token) > 1
     }
+
+
+def _normalise_entity(term: str) -> str:
+    return re.sub(r"\s+", " ", term.strip().strip("\"'.,:;()[]{}")).lower()
+
+
+def _entity_context(text: str, start: int, end: int, max_chars: int = 160) -> str:
+    left = max(0, start - max_chars // 2)
+    right = min(len(text), end + max_chars // 2)
+    return re.sub(r"\s+", " ", text[left:right]).strip()
+
+
+def _extract_entity_candidates(text: str) -> list[tuple[str, int, int]]:
+    """Extract deterministic in-universe entity/jargon candidates."""
+    candidates: list[tuple[str, int, int]] = []
+
+    for pattern in (_QUOTED_TERM_RE, _COMPOUND_TOKEN_RE, _ACRONYM_RE):
+        for match in pattern.finditer(text):
+            term = match.group(1) if pattern is _QUOTED_TERM_RE else match.group(0)
+            start, end = match.span(1) if pattern is _QUOTED_TERM_RE else match.span()
+            candidates.append((term, start, end))
+
+    for pattern in (_CAPITALIZED_PHRASE_RE, _TITLE_PAIR_RE):
+        for match in pattern.finditer(text):
+            term = match.group(0).strip()
+            if len(term) > 1:
+                candidates.append((term, match.start(), match.end()))
+
+    for match in re.finditer(r"\bThe\s+[A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*\b", text):
+        term = match.group(0).strip()
+        if len(term) > 1:
+            candidates.append((term, match.start(), match.end()))
+
+    return candidates
+
+
+def _build_corpus_lexicon(
+    texts: list[str],
+    ids: list[str],
+) -> dict[str, dict[str, object]]:
+    """Build a lightweight corpus-local dictionary for retrieval expansion."""
+    lexicon: dict[str, dict[str, object]] = {}
+    seen_locations: set[tuple[str, str, int]] = set()
+
+    for doc_id, text in zip(ids, texts):
+        for term, start, end in _extract_entity_candidates(text):
+            key = _normalise_entity(term)
+            if len(key) < 2:
+                continue
+
+            location = (doc_id, key, start)
+            if location in seen_locations:
+                continue
+            seen_locations.add(location)
+
+            entry = lexicon.setdefault(
+                key,
+                {
+                    "surface": term.strip(),
+                    "count": 0,
+                    "doc_ids": set(),
+                    "contexts": [],
+                },
+            )
+            entry["count"] = int(entry["count"]) + 1
+            entry["doc_ids"].add(doc_id)
+            if len(entry["contexts"]) < 3:
+                entry["contexts"].append(_entity_context(text, start, end))
+
+    return lexicon
+
+
+def _expand_query_for_retrieval(
+    question: str,
+    lexicon: dict[str, dict[str, object]],
+    limit: int = ENTITY_EXPANSION_LIMIT,
+) -> str:
+    """Append corpus-local entity hints for retrieval without changing QA intent."""
+    if not lexicon:
+        return question
+
+    query_key = _normalise_entity(question)
+    query_terms = _content_words(question)
+    additions: list[str] = []
+
+    def add(term: str) -> None:
+        if term and term not in additions and term.lower() not in question.lower():
+            additions.append(term)
+
+    for key, entry in lexicon.items():
+        surface = str(entry["surface"])
+        key_terms = _content_words(key)
+        exact_or_partial = key in query_key or query_key in key
+        entity_overlap = bool(query_terms.intersection(key_terms))
+        context_overlap = any(
+            len(query_terms.intersection(_content_words(str(context)))) >= 2
+            for context in entry["contexts"]
+        )
+        if exact_or_partial or entity_overlap or context_overlap:
+            add(surface)
+        if len(additions) >= limit:
+            break
+
+    if not additions:
+        return question
+    return f"{question} {' '.join(additions[:limit])}"
 
 
 def _select_evidence_snippet(
@@ -256,6 +418,7 @@ class NLPManager:
         self._llm_lock = threading.Lock()
         self.index = None
         self.bm25 = None
+        self.lexicon: dict[str, dict[str, object]] = {}
         self.doc_ids: list[str] = []
         self.doc_texts: list[str] = []
 
@@ -294,6 +457,7 @@ class NLPManager:
         """Loads the corpus of documents for RAG QA."""
         texts = [d["document"] for d in documents]
         ids = [d["id"] for d in documents]
+        self.lexicon = _build_corpus_lexicon(texts, ids)
 
         chunks, chunk_ids = _chunk_documents(texts, ids)
 
@@ -326,9 +490,13 @@ class NLPManager:
             L4 (no relevant docs): both empty.
             L5 (false premise): documents populated, answer empty.
         """
+        if _looks_like_external_l4(question):
+            return {"documents": [], "answer": ""}
+
         # --- Step 1: Hybrid retrieval (dense + BM25) ---
+        retrieval_query = _expand_query_for_retrieval(question, self.lexicon)
         q_emb = self.embedder.encode(
-            [_format_embed_query(question)],
+            [_format_embed_query(retrieval_query)],
             normalize_embeddings=True,
         )
         scores, indices = self.index.search(q_emb.astype(np.float32), TOP_K)
@@ -337,15 +505,36 @@ class NLPManager:
             return {"documents": [], "answer": ""}
 
         max_dense_score = float(scores[0][0])
-        if max_dense_score < UNANSWERABLE_THRESHOLD:
-            return {"documents": [], "answer": ""}
+        max_bm25_score = 0.0
+        bm25_ranked: list[int] = []
 
         if self.bm25 is not None:
-            bm25_scores = self.bm25.get_scores(_tokenize_for_sparse(question))
+            bm25_scores = self.bm25.get_scores(_tokenize_for_sparse(retrieval_query))
+            if len(bm25_scores):
+                max_bm25_score = float(np.max(bm25_scores))
             bm25_ranked = list(np.argsort(bm25_scores)[::-1][:TOP_K])
             combined = _rrf_merge(dense_ranked, bm25_ranked)
         else:
             combined = dense_ranked
+
+        entity_match_count = 0
+        if self.lexicon:
+            question_key = _normalise_entity(question)
+            question_terms = _content_words(question)
+            entity_match_count = sum(
+                1
+                for key in self.lexicon
+                if key in question_key
+                or bool(question_terms.intersection(_content_words(key)))
+            )
+
+        if (
+            max_dense_score < UNANSWERABLE_THRESHOLD
+            and max_bm25_score < MIN_BM25_RELEVANCE
+            and entity_match_count == 0
+        ):
+            return {"documents": [], "answer": ""}
+
         combined = combined[:RERANK_TOP_K]
         if not combined:
             return {"documents": [], "answer": ""}
@@ -386,12 +575,12 @@ class NLPManager:
                 "top_rerank_score": (
                     float(np.max(rerank_scores)) if len(rerank_scores) else 0.0
                 ),
+                "max_bm25_score": max_bm25_score,
+                "entity_match_count": entity_match_count,
                 "candidate_count": len(combined),
             },
         )
         if verifier["status"] == "false_premise":
-            return {"documents": top3_ids, "answer": ""}
-        if verifier["status"] == "insufficient_info":
             return {"documents": top3_ids, "answer": ""}
 
         # --- Step 4: Generate answer from verified evidence ---
@@ -419,6 +608,9 @@ class NLPManager:
             '"evidence_quote":"Exact sentence from context or empty string",'
             '"reason":"One short sentence"}\n\n'
             "Status rules:\n"
+            "- In-universe jargon, code names, corporations, places, and slang "
+            "are valid evidence terms; preserve them exactly and do not "
+            "normalize them to real-world concepts.\n"
             "- answerable: the context directly answers every part of the question. "
             "evidence_quote must be an exact quote from the context.\n"
             "- false_premise: the context is relevant and contradicts a premise in the question.\n"

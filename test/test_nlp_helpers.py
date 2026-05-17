@@ -56,7 +56,42 @@ def test_sparse_tokenizer_normalizes_punctuation_and_case():
 
     tokens = manager._tokenize_for_sparse("Dr. Nyx-7's Haven: Sector_12 floods!")
 
-    assert tokens == ["dr", "nyx", "7", "s", "haven", "sector_12", "floods"]
+    assert tokens == [
+        "dr",
+        "nyx",
+        "7",
+        "s",
+        "haven",
+        "sector_12",
+        "sector",
+        "12",
+        "floods",
+    ]
+
+
+def test_sparse_tokenizer_preserves_lore_compounds_codes_and_parts():
+    manager = _load_nlp_manager_module()
+
+    tokens = manager._tokenize_for_sparse(
+        "Nyx-7 cited SH-EV-00714 for CGC Sector_12 operations."
+    )
+
+    assert tokens == [
+        "nyx-7",
+        "nyx",
+        "7",
+        "cited",
+        "sh-ev-00714",
+        "sh",
+        "ev",
+        "00714",
+        "for",
+        "cgc",
+        "sector_12",
+        "sector",
+        "12",
+        "operations",
+    ]
 
 
 def test_chunk_documents_uses_word_windows_with_overlap_and_preserves_doc_ids():
@@ -85,6 +120,55 @@ def test_embed_query_text_adds_bge_instruction_for_plain_question():
 
     assert query.startswith("Represent this sentence for searching relevant passages:")
     assert query.endswith("Who governs Haven?")
+
+
+def test_build_corpus_lexicon_extracts_lore_entities_codes_and_context():
+    manager = _load_nlp_manager_module()
+
+    lexicon = manager._build_corpus_lexicon(
+        [
+            (
+                "The Cascade flooded old governments. "
+                "CGC assigned SH-EV-00714 to Nyx-7 under the Blackshore Accords."
+            )
+        ],
+        ["DOC-1"],
+    )
+
+    assert "the cascade" in lexicon
+    assert "blackshore accords" in lexicon
+    assert "cgc" in lexicon
+    assert "sh-ev-00714" in lexicon
+    assert "nyx-7" in lexicon
+    assert lexicon["the cascade"]["surface"] == "The Cascade"
+    assert lexicon["the cascade"]["doc_ids"] == {"DOC-1"}
+    assert "flooded old governments" in lexicon["the cascade"]["contexts"][0]
+
+
+def test_expand_query_for_retrieval_appends_matching_entities_and_context_terms():
+    manager = _load_nlp_manager_module()
+    lexicon = manager._build_corpus_lexicon(
+        [
+            (
+                "The Cascade flooded old governments. "
+                "Haven survived as the last great city."
+            ),
+            "Blackshore Accords govern maritime approaches to Haven.",
+        ],
+        ["DOC-1", "DOC-2"],
+    )
+
+    expanded = manager._expand_query_for_retrieval(
+        "Which flood left the last great city under Haven control?",
+        lexicon,
+        limit=4,
+    )
+
+    assert expanded.startswith(
+        "Which flood left the last great city under Haven control?"
+    )
+    assert "The Cascade" in expanded
+    assert "Haven" in expanded
 
 
 def test_parse_verifier_json_accepts_valid_json_inside_model_output():
@@ -175,17 +259,34 @@ class _FakeIndex:
         )
 
 
+class _FakeBM25:
+    def __init__(self, scores):
+        self.scores = np.array(scores, dtype=np.float32)
+        self.queries = []
+
+    def get_scores(self, tokens):
+        self.queries.append(tokens)
+        return self.scores
+
+
 class _FakeReranker:
     def predict(self, pairs):
         return np.array([0.9, 0.8, 0.7], dtype=np.float32)
 
 
-def _fake_loaded_manager(module, dense_score=0.8, verifier_status="insufficient_info"):
+def _fake_loaded_manager(
+    module,
+    dense_score=0.8,
+    verifier_status="insufficient_info",
+    bm25_scores=None,
+    lexicon=None,
+):
     manager = module.NLPManager.__new__(module.NLPManager)
     manager.embedder = _FakeEmbedder([1.0, 0.0])
     manager.index = _FakeIndex(dense_score)
-    manager.bm25 = None
+    manager.bm25 = _FakeBM25(bm25_scores) if bm25_scores is not None else None
     manager.reranker = _FakeReranker()
+    manager.lexicon = lexicon or {}
     manager.doc_ids = ["DOC-1", "DOC-2", "DOC-3"]
     manager.doc_texts = [
         "The launch permit was renewed annually by the CGC.",
@@ -235,7 +336,45 @@ def test_qa_weak_retrieval_returns_empty_docs_without_verifier_call():
     assert result == {"documents": [], "answer": ""}
 
 
-def test_qa_strong_insufficient_info_returns_top_docs_with_empty_answer():
+def test_qa_external_l4_question_returns_empty_docs_without_verifier_call():
+    module = _load_nlp_manager_module()
+    manager = _fake_loaded_manager(module, dense_score=0.8)
+    manager._verify_evidence = types.MethodType(
+        lambda self, question, context, retrieval_signals: (_ for _ in ()).throw(
+            AssertionError("verifier should not run for external L4 questions")
+        ),
+        manager,
+    )
+
+    result = manager.qa(
+        "What is the current FDA approval status for human somatic gene therapy "
+        "treatments as of 2024?"
+    )
+
+    assert result == {"documents": [], "answer": ""}
+
+
+def test_qa_low_dense_score_continues_when_bm25_entity_evidence_is_strong():
+    module = _load_nlp_manager_module()
+    lexicon = module._build_corpus_lexicon(
+        ["CGC renewed the launch permit annually under SH-EV-00714."],
+        ["DOC-1"],
+    )
+    manager = _fake_loaded_manager(
+        module,
+        dense_score=0.1,
+        verifier_status="answerable",
+        bm25_scores=[8.0, 0.0, 0.0],
+        lexicon=lexicon,
+    )
+
+    result = manager.qa("How often did CGC renew SH-EV-00714?")
+
+    assert result == {"documents": ["DOC-1", "DOC-2", "DOC-3"], "answer": "annually"}
+    assert "sh-ev-00714" in manager.bm25.queries[0]
+
+
+def test_qa_strong_insufficient_info_still_generates_answer():
     module = _load_nlp_manager_module()
     manager = _fake_loaded_manager(
         module,
@@ -245,4 +384,4 @@ def test_qa_strong_insufficient_info_returns_top_docs_with_empty_answer():
 
     result = manager.qa("Which alternate permit was cited?")
 
-    assert result == {"documents": ["DOC-1", "DOC-2", "DOC-3"], "answer": ""}
+    assert result == {"documents": ["DOC-1", "DOC-2", "DOC-3"], "answer": "annually"}

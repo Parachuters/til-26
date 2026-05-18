@@ -101,7 +101,7 @@ class ASRManager:
         if compute_type is None:
             compute_type = "float16" if device == "cuda" else "int8"
 
-        model_name = os.getenv("ASR_MODEL_NAME", "large-v3")
+        model_name = os.getenv("ASR_MODEL_NAME", "large-v3-turbo")
         cpu_threads = int(os.getenv("ASR_CPU_THREADS", "4"))
         num_workers = int(os.getenv("ASR_NUM_WORKERS", "1"))
         download_root = os.getenv("HF_HOME")
@@ -118,6 +118,7 @@ class ASRManager:
         self.min_silence_duration_ms = int(
             os.getenv("ASR_MIN_SILENCE_DURATION_MS", "500")
         )
+        self.vad_filter = _env_bool("ASR_VAD_FILTER", True)
         # Threshold below which a segment is considered non-speech. Higher
         # values reduce hallucinations on noisy / silent sections.
         self.no_speech_threshold = float(os.getenv("ASR_NO_SPEECH_THRESHOLD", "0.7"))
@@ -162,7 +163,7 @@ class ASRManager:
             beam_size=self.beam_size,
             language=detected_lang,  # None → auto-detect
             initial_prompt=CLAIROS_INITIAL_PROMPT,
-            vad_filter=True,
+            vad_filter=self.vad_filter,
             vad_parameters={
                 "min_silence_duration_ms": self.min_silence_duration_ms,
             },

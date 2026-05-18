@@ -163,7 +163,10 @@ class AEManager:
             from stable_baselines3 import PPO
 
             return PPO.load(str(model_path), device="cpu")
-        except Exception:
+        except Exception as exc:
+            import traceback
+            print(f"RL load failed: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
             return None
 
     def _forced_safety_action(

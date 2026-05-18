@@ -12,7 +12,7 @@ RUN pip install -U pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y opencv-python opencv-contrib-python \
-    && pip install --no-cache-dir opencv-python-headless
+    && pip install --no-cache-dir --force-reinstall --no-deps opencv-python-headless
 
 # Copy trained model weights (must be placed in cv/ before building)
 COPY best.pt /workspace/best.pt

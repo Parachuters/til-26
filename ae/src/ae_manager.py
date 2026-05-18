@@ -113,6 +113,12 @@ class AEManager:
     def __init__(self) -> None:
         self.state = BeliefState()
         self.rl_model = self._load_rl_model()
+        
+        # Add this print statement to verify
+        if self.rl_model is not None:
+            print("SUCCESS: RL weights are loaded and active!")
+        else:
+            print("WARNING: RL weights failed to load. Using the fallback planner.")
 
     def reset(self) -> None:
         self.state = BeliefState()

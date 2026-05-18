@@ -3,3 +3,6 @@
 fastapi
 numpy
 uvicorn[standard]
+stable-baselines3
+torch
+gymnasium

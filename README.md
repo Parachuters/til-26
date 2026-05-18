@@ -35,7 +35,7 @@ Finally, install the development dependencies into your newly created virtual en
 pip install -r requirements-dev.txt
 ```
 
-You should also considering using [`uv`](https://docs.astral.sh/uv/) for python versioning and dependency management all in one.
+You should also consider using [`uv`](https://docs.astral.sh/uv/) for python versioning and dependency management all in one.
 
 ## Understanding this repo
 
@@ -103,7 +103,8 @@ For all the details of what the submission command does, check out the [Wiki](ht
 ## Links
 
 * The repo [Wiki](https://github.com/til-ai/til-26/wiki) contains tutorials, specifications, resources, and more.
-* Your [~~Vertex AI~~ Agent Platform Workbench Instance](https://console.cloud.google.com/agent-platform/workbench/instances?project=til-ai-2026) on Google Cloud Platform is where you'll do most of your development.
+* The [Project Submission](https://tribegroup.notion.site/Project-Submission-33a5263ef45a80c3bad7d6006752cba4#33a5263ef45a81c9a4bce1c6c562a050) page contains submission requirements and process details.
+* Your [Agent Platform Workbench Instance](https://console.cloud.google.com/agent-platform/workbench/instances?project=til-ai-2026) on Google Cloud Platform is where you'll do most of your development.
 * The [Strategist's Handbook](https://tribegroup.notion.site/BrainHack-2026-TIL-AI-Strategist-s-Handbook-33a5263ef45a80429a9dc47c569e40c3) houses the Leaderboard and info about the competition.
 * [TIL-AI Curriculum](https://drive.google.com/drive/folders/18zP4pHt5E6YqA3usey16ETEzKNeAn5X9) on Google Drive contains educational materials specially crafted for TIL-AI.
 * The [#hackoverflow](https://discord.com/channels/1488845200523661454/1488845611032903691) channel on the TIL-AI Discord server is a forum just for Strategists like you.

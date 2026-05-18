@@ -9,10 +9,11 @@ Answer questions using **Retrieval-Augmented Generation (RAG)** on a provided do
 - Correctness: ModernBERT-base answer equivalence model (threshold 0.9)
 - Partial credit: 0.4 if retrieval correct but answer wrong
 - L4 (unanswerable, no reference): return `{"documents": [], "answer": ""}`
-- L5 (unanswerable, false premise): return `{"documents": [], "answer": ""}`
+- L5 (unanswerable, false premise): return at least one relevant document ID and an empty answer, e.g. `{"documents": ["DOC-0001"], "answer": ""}`
 
 **Interface:** POST `/nlp` port `5004`
-- First request: corpus loading (return `{"predictions": [{"status": "loaded"}]}`)
+- First request: corpus loading (current server returns `{"predictions": [{"status": "loading"}]}` while background loading runs)
+- Poll request: `{"instances": [{"poll": "true"}]}` until `{"predictions": [{"status": "loaded"}]}`
 - Subsequent requests: QA (return `documents` + `answer` per question)
 
 ---
@@ -25,7 +26,7 @@ Answer questions using **Retrieval-Augmented Generation (RAG)** on a provided do
 | L2 | Single inference step from one doc | RAG + LLM reasoning |
 | L3 | Cross-document synthesis | RAG with multi-doc context |
 | L4 | Unanswerable, no relevant docs exist | Return empty |
-| L5 | Unanswerable due to false premise | Return empty |
+| L5 | Unanswerable due to false premise | Return relevant docs with empty answer |
 
 ---
 
@@ -122,14 +123,14 @@ def load_llm():
     return tokenizer, model
 ```
 
-**Option B: Claude API (via Anthropic SDK) — if internet access is allowed**
+**Option B: External API (development only, not valid for evaluation containers)**
 
 ```python
 import anthropic
 client = anthropic.Anthropic()
 ```
 
-Use Option A for air-gapped competition environment. Pre-download weights to Docker image.
+Use Option A for the air-gapped competition environment. Pre-download weights into the Docker image.
 
 ### 4. QA Pipeline (`qa`)
 
@@ -246,7 +247,7 @@ Trade-off: adds ~100ms per query; worth it for L3/L4/L5 precision.
 ## Dockerfile Notes
 
 ```dockerfile
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM nvcr.io/nvidia/pytorch:25.11-py3
 RUN pip install sentence-transformers faiss-gpu transformers accelerate
 # Pre-download models
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
@@ -278,9 +279,10 @@ torch>=2.1.0
 
 ## Scoring Checklist
 
-- [ ] L4/L5: return `{"documents": [], "answer": ""}` exactly
+- [ ] L4: return `{"documents": [], "answer": ""}` exactly
+- [ ] L5: return at least one relevant document ID and `answer: ""`
 - [ ] Only first 3 doc IDs are scored; return max 3
 - [ ] Test unanswerable threshold on all 5 question levels
-- [ ] Verify corpus loading returns `{"predictions": [{"status": "loaded"}]}`
+- [ ] Verify corpus loading reaches `{"predictions": [{"status": "loaded"}]}` after polling
 - [ ] Measure end-to-end QA latency; stay within 30-min budget
 - [ ] Confirm answer equivalence style matches ModernBERT-base threshold 0.9

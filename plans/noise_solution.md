@@ -2,7 +2,7 @@
 
 ## Problem Summary
 
-Add adversarial noise to JPEG images to degrade **opponent teams' CV models** while staying within distortion constraints (SSIM and RMSE L2 norm limits). This is part of the CV challenge worth up to 20% of total score.
+Add adversarial noise to JPEG images to degrade **opponent teams' CV models** while staying within distortion constraints (SSIM and RMSE L2 norm limits). The public challenge specification says Qualifiers do not directly reward noise output, but it can matter in Finals by making opponents' CV inputs harder.
 
 **Interface:** POST `/noise` port `5003`
 - Input: base64-encoded JPEG bytes

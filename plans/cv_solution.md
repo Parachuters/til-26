@@ -180,7 +180,7 @@ Then load with `YOLO("best.engine")`.
 ## Dockerfile Notes
 
 ```dockerfile
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM nvcr.io/nvidia/pytorch:25.11-py3
 RUN pip install ultralytics pillow
 COPY best.pt /app/best.pt
 ```

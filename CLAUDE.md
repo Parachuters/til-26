@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Sources of Truth
+
+Use these references as the canonical context for challenge rules, submission requirements, and implementation details:
+
+- Project submission: https://tribegroup.notion.site/Project-Submission-33a5263ef45a80c3bad7d6006752cba4#33a5263ef45a81c9a4bce1c6c562a050
+- BrainHack 2026 TIL AI Strategist's Handbook: https://tribegroup.notion.site/BrainHack-2026-TIL-AI-Strategist-s-Handbook-33a5263ef45a80429a9dc47c569e40c3
+- TIL 2026 wiki: https://github.com/til-ai/til-26/wiki
+- TIL 2026 repository: https://github.com/til-ai/til-26
+
 ## Commands
 
 All commands below run on the GCP Workbench instance where the `til` CLI is pre-installed and training data lives at `/home/jupyter/{TEAM_TRACK}/`.
@@ -23,7 +32,10 @@ til test ae
 
 # Submit for evaluation
 til submit asr
+til submit cv
+til submit noise
 til submit nlp
+til submit ae
 
 # Run a single test script directly (container must already be running on correct port)
 python test/test_asr.py
@@ -79,13 +91,14 @@ The `til-26-ae` submodule installs the `til_environment` package (a PettingZoo m
 ### Viewcone Shape Reference
 
 - `agent_viewcone`: `[7, 5, 25]` — 7 cells deep, 5 cells wide, 25 feature channels, oriented to agent's facing direction
-- `base_viewcone`: `[5, 5, 25]` — square view centred on the team's base
+- `base_viewcone`: `[5, 5, 25]` in the current server/test payload — square view centred on the team's base. Infer the shape from the incoming tensor where practical.
 
 ### Scoring Details
 
 **ASR:** Chinese uses CER (character-level); all other languages use WER (word-level). The exact transforms applied before scoring are in `test/test_asr.py`: lowercase, dash→space substitution, remove punctuation, strip. Score = `max(0, 1 - mean_error_rate)` averaged over all 4 languages equally.
 
 **NLP:** Scoring is in `test/test_nlp.py` via `AnswerEquivalenceEvaluator` (ModernBERT-based, threshold=0.9, max_length=512). Special cases:
+- Candidate answers are first stripped of non-printable characters and truncated to 64 tokens before the evaluator input is built.
 - **L4** (no relevant docs exist): both `documents` and `answer` must be empty → score 1.0
 - **L5** (false premise): needs at least 1 doc ID overlapping ground truth **and** empty `answer` → score 1.0; overlap without empty answer → 0.4
 - Retrieval success (≥1 doc overlap) but wrong answer → 0.4 partial credit

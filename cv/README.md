@@ -31,7 +31,7 @@ Your route handler function must return a `dict` with this structure:
     "predictions": [
         [
             {
-                "bbox": [x, y, w, h],
+                "bbox": [left, top, width, height],
                 "category_id": category_id
             },
             ...
@@ -41,7 +41,7 @@ Your route handler function must return a `dict` with this structure:
 }
 ```
 
-where `x`, `y`, `w`, `h`, and `category_id` are defined as above.
+where `left` and `top` are the zero-indexed pixel coordinates of the top-left corner of the predicted bounding box, `width` and `height` are the box dimensions in pixels, and `category_id` is the 0-indexed target category. This is LTWH format, not normalized YOLO center format.
 
 If your model detects no objects in a scene, your handler should output an empty list for that scene.
 

@@ -10,8 +10,10 @@ try:
     from ultralytics import YOLO
     import torch
     _ultralytics_available = True
-except ImportError:
+    _ultralytics_import_error = None
+except ImportError as exc:
     _ultralytics_available = False
+    _ultralytics_import_error = exc
 
 
 MODEL_PATH = os.getenv("CV_MODEL_PATH", "/workspace/best.pt")
@@ -30,7 +32,10 @@ class CVManager:
 
     def __init__(self):
         if not _ultralytics_available:
-            raise RuntimeError("ultralytics is not installed")
+            raise RuntimeError(
+                f"ultralytics or one of its dependencies failed to import: "
+                f"{_ultralytics_import_error}"
+            ) from _ultralytics_import_error
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = YOLO(MODEL_PATH)
         self.model.to(device)

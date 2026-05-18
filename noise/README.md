@@ -1,4 +1,4 @@
-# TODO: Adversarial Noising
+# Noise (Adversarial Noising)
 
 An additional component to the CV challenge is for you to adversarially noise images for your competitors to use as inputs to their CV models.
 

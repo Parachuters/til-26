@@ -21,7 +21,17 @@ To load the test corpus, the first request sent to your endpoint will be of the 
 }
 ```
 
-This is expected to be parsed by your NLP RAG QA system to be used as context for RAG. You can thus do your embedding/chunking/etc on this data. Once your model has completed processing it, return the following:
+This is expected to be parsed by your NLP RAG QA system to be used as context for RAG. You can thus do your embedding/chunking/etc on this data.
+
+In this repository, `nlp_server.py` starts corpus loading in a background thread. Implement `NLPManager.load_corpus()` as a synchronous, blocking method that sets the manager to a loaded state when complete. The initial corpus request may return:
+
+```JSON
+{
+  "predictions": [{"status": "loading"}]
+}
+```
+
+Poll the same endpoint with `{"instances": [{"poll": "true"}]}` until it returns:
 
 ```JSON
 {
@@ -29,7 +39,7 @@ This is expected to be parsed by your NLP RAG QA system to be used as context fo
 }
 ```
 
-This will be taken as the signal that your system is ready to move on to receiving input.
+This will be taken as the signal that your system is ready to move on to receiving question input.
 
 ### Input
 

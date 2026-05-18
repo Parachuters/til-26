@@ -29,7 +29,7 @@ Navigate a **16×16 grid** maze for 200 timesteps, competing against 5 other tea
 | Field | Shape | Description |
 |---|---|---|
 | `agent_viewcone` | `[7, 5, 25]` | 7-deep × 5-wide cone, 25 channels |
-| `base_viewcone` | `[5, 5, 25]` | Square view from base, 25 channels |
+| `base_viewcone` | `[5, 5, 25]` in the current server/test payload | Square view from base, 25 channels; infer shape from the tensor where possible |
 | `direction` | int 0-3 | 0=RIGHT, 1=DOWN, 2=LEFT, 3=UP |
 | `location` | [x, y] | Agent position |
 | `base_location` | [x, y] | Team base position |
@@ -305,7 +305,7 @@ if observation["step"] == 0:
 ## Dockerfile Notes
 
 ```dockerfile
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM python:3.11-slim
 RUN pip install stable-baselines3 gymnasium
 COPY ae_ppo.zip /app/ae_ppo.zip
 ```

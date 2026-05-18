@@ -52,7 +52,7 @@ Speed score formula: `1 - min(t_elapsed, t_max) / t_max` where `t_max = 30 minut
 
 - 30-minute inference budget for full test set
 - Docker containerized; no internet access at inference time → pre-download all models
-- All models must be GPU-optimized (fp16, TensorRT, or quantized)
+- ASR/CV/NLP/Noise should be GPU-optimized where possible (fp16, TensorRT, or quantized); AE uses the CPU-only `python:3.11-slim` image in this repo
 - AE: never call `/reset` — detect `step == 0` internally
 - NLP: first request is corpus loading, subsequent are questions
 

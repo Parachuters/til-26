@@ -119,7 +119,7 @@ Trade-off: higher VRAM usage (~10 GB for large-v3 + alignment model).
 ## Dockerfile Notes
 
 ```dockerfile
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM nvcr.io/nvidia/pytorch:25.11-py3
 RUN pip install faster-whisper soundfile librosa
 # Pre-download model weights to avoid cold-start penalty
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cpu')"

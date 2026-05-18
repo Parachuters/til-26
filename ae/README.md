@@ -77,14 +77,16 @@ The action is an integer:
 
 ## Current agent implementation
 
-`src/ae_manager.py` implements a stateful hybrid planner for Advanced maps:
+`src/ae_manager.py` implements a stateful planner-first hybrid agent for Advanced maps:
 
 - Reconstructs a round-local belief map from `agent_viewcone` and `base_viewcone`.
 - Infers base-view shape from the incoming tensor instead of hard-coding one size.
 - Tracks seen walls, destructible walls, collectibles, enemy agents/bases, bombs, visited cells, and stale dynamic entities.
 - Simulates bomb hazards over future timesteps and uses direction-aware BFS over `(x, y, direction, time)`.
-- Prioritizes immediate bomb escape, safe opportunistic bombing, nearby base defense, reward collection, frontier exploration, and useful wall bombing.
+- Prioritizes immediate bomb escape, high-confidence planner actions, optional learned policy actions, then planner fallback.
 - Applies `action_mask` as the final guard and resets state on `step == 0`, step regression, empty `POST /ae`, or `POST /reset`.
+- Keeps learned policy deployment opt-in: set `AE_ENABLE_RL=1` and `AE_POLICY_MODEL=ae/src/models/ae_policy.pt` only after local held-out evaluation beats planner-only.
+- Logs action source counters for `safety`, `planner`, `learned`, and `fallback`.
 
 ## Evaluation plan
 
@@ -111,7 +113,7 @@ python test/test_ae.py
 
 5. Validate with `TEAM_TRACK=advanced` and many random environment seeds. The local test uses random opponents, so also test against scripted greedy collectors and aggressive bombers before relying on the score.
 
-## Training and deployment follow-ups
+## Planner-supervised training flow
 
 1. Establish the rule-based baseline on the GCP Workbench instance:
 
@@ -122,31 +124,41 @@ til test ae
 
 Record `total rewards`, `score`, track, date, and commit before starting RL.
 
-2. Run a PPO harness smoke test:
+2. Collect planner demonstrations on Advanced random maps:
 
 ```bash
-python ae/train/train_ppo.py smoke --seed 0 --steps 20
+python ae/train/collect_planner_demos.py --episodes 2000 --seed-start 0
 ```
 
-3. Train PPO on randomized Advanced maps:
+3. Train the recurrent masked behavior-cloning policy:
 
 ```bash
-python ae/train/train_ppo.py train --timesteps 5000000 --seed 0
+python ae/train/train_bc.py --demos ae/train/results/planner_demos.npz
 ```
 
-Outputs are written to `ae/train/runs/` and `ae/train/checkpoints/`, both ignored by Git.
+Continue only if validation expert-action accuracy is high enough and BC rollout reward reaches the agreed floor.
 
-4. A/B test planner versus PPO over shared seeds:
+4. Fine-tune from the BC checkpoint with masked recurrent PPO:
 
 ```bash
-python ae/train/train_ppo.py eval --model ae/train/checkpoints/ae_ppo.zip --episodes 60 --seed 100
+python ae/train/train_masked_ppo.py --init ae/train/checkpoints/ae_bc.pt
 ```
 
-5. Deploy PPO only after it consistently beats the planner. Copy the winning checkpoint to `ae/src/models/ae_ppo.zip` or set `AE_PPO_MODEL` to its path, then add runtime PPO dependencies to `ae/requirements.txt` before building the Docker image. If the model or dependencies are absent, `AEManager` automatically keeps using the planner.
+5. Compare planner, BC, PPO, and hybrid on identical held-out seeds:
 
-6. Tune the heuristic weights in `TILE_WEIGHTS`, frontier scoring, bomb thresholds, and defense radius with random search or Bayesian optimization over the rollout harness.
+```bash
+python ae/train/evaluate_policies.py --episodes 60 --seed-start 20000
+```
 
-7. Keep the planner as the safety layer. The optional PPO path is gated behind immediate hazard handling, bomb-escape validation, and final `action_mask` enforcement.
+6. Deploy learned policy only if hybrid beats planner-only on mean reward, median reward, and lower-tail stability. Copy the winning compact checkpoint to `ae/src/models/ae_policy.pt`, add `torch` to `ae/requirements.txt` for that learned image, then run the container with:
+
+```bash
+AE_ENABLE_RL=1 AE_POLICY_MODEL=ae/src/models/ae_policy.pt
+```
+
+If the model, dependency, or confidence gate fails, `AEManager` automatically keeps using planner-only behavior.
+
+7. Tune the heuristic weights in `TILE_WEIGHTS`, frontier scoring, bomb thresholds, and defense radius with random search or Bayesian optimization over the rollout harness.
 
 8. Before submission, rebuild the CPU AE image, run `til test ae`, verify `GET /health`, and submit only the validated tag:
 

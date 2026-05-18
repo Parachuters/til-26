@@ -11,9 +11,6 @@ from typing import Iterable
 
 import numpy as np
 
-from ppo_preprocess import preprocess_observation
-
-
 # View channels.
 VISIBLE = 0
 WALL_RIGHT = 1
@@ -112,16 +109,33 @@ class AEManager:
 
     def __init__(self) -> None:
         self.state = BeliefState()
-        self.rl_model = self._load_rl_model()
-        
-        # Add this print statement to verify
-        if self.rl_model is not None:
-            print("SUCCESS: RL weights are loaded and active!")
+        self.source_counts = {
+            "safety": 0,
+            "planner": 0,
+            "learned": 0,
+            "fallback": 0,
+        }
+        self.last_action_source: str | None = None
+        self.learned_enabled = os.getenv("AE_ENABLE_RL", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        self.learned_min_confidence = float(os.getenv("AE_RL_MIN_CONFIDENCE", "0.55"))
+        self.learned_hidden_state = None
+        self.learned_policy = self._load_learned_policy()
+        self.rl_model = self.learned_policy
+
+        if not self.learned_enabled:
+            print("AE learned policy disabled; using planner-only mode.")
+        elif self.learned_policy is not None:
+            print("AE learned policy loaded; hybrid gate is active.")
         else:
-            print("WARNING: RL weights failed to load. Using the fallback planner.")
+            print("AE learned policy requested but unavailable; using planner-only mode.")
 
     def reset(self) -> None:
         self.state = BeliefState()
+        self.learned_hidden_state = None
 
     def ae(self, observation: dict) -> int:
         if not observation:
@@ -141,31 +155,46 @@ class AEManager:
 
         forced_action = self._forced_safety_action(observation, mask, hazards)
         if forced_action is not None:
+            self._count_source("safety")
             return forced_action
 
-        rl_action = self._rl_action(observation, mask, hazards)
-        if rl_action is not None:
-            return rl_action
+        priority_action = self._planner_priority_action(mask, hazards)
+        if priority_action is not None:
+            self._count_source("planner")
+            return priority_action
 
+        learned_action = self._learned_action(observation, mask, hazards)
+        if learned_action is not None:
+            self._count_source("learned")
+            return learned_action
+
+        self._count_source("fallback")
         return self._planner_action(mask, hazards)
 
-    def _load_rl_model(self) -> object | None:
-        if os.getenv("AE_DISABLE_RL", "").lower() in {"1", "true", "yes"}:
+    def _count_source(self, source: str) -> None:
+        self.last_action_source = source
+        self.source_counts[source] = self.source_counts.get(source, 0) + 1
+        total = sum(self.source_counts.values())
+        if total > 0 and total % 100 == 0:
+            print(f"AE action source counts: {self.source_counts}")
+
+    def _load_learned_policy(self) -> object | None:
+        if not self.learned_enabled:
             return None
 
-        default_path = Path(__file__).resolve().parent / "models" / "ae_ppo.zip"
-        model_path = Path(os.getenv("AE_PPO_MODEL", str(default_path)))
+        default_path = Path(__file__).resolve().parent / "models" / "ae_policy.pt"
+        model_path = Path(os.getenv("AE_POLICY_MODEL", str(default_path)))
         if not model_path.exists():
             return None
 
         try:
-            import ppo_policy  # noqa: F401  # Ensure custom extractor is importable.
-            from stable_baselines3 import PPO
+            from masked_recurrent_policy import load_masked_recurrent_policy
 
-            return PPO.load(str(model_path), device="cpu")
+            return load_masked_recurrent_policy(model_path, device="cpu")
         except Exception as exc:
             import traceback
-            print(f"RL load failed: {type(exc).__name__}: {exc}")
+
+            print(f"AE learned policy load failed: {type(exc).__name__}: {exc}")
             traceback.print_exc()
             return None
 
@@ -186,22 +215,54 @@ class AEManager:
 
         return None
 
-    def _rl_action(
+    def _planner_priority_action(
+        self, mask: np.ndarray, hazards: dict[int, set[Cell]]
+    ) -> int | None:
+        if self._should_place_attack_bomb(mask, hazards):
+            return PLACE_BOMB
+
+        defense_target = self._base_defense_target()
+        if defense_target is not None:
+            action = self._plan_first_action(defense_target, hazards, max_depth=20)
+            if action is not None:
+                return self._legal_or_fallback(action, mask, hazards)
+
+        ranked = self._ranked_targets(hazards)
+        if ranked:
+            target, score = ranked[0]
+            close_high_value = self._manhattan(self.state.pos, target) <= 2 and score >= 10.0
+            if score >= float(os.getenv("AE_PLANNER_PRIORITY_SCORE", "18.0")) or close_high_value:
+                action = self._plan_first_action(target, hazards)
+                if action is not None:
+                    return self._legal_or_fallback(action, mask, hazards)
+
+        if self._wall_bomb_value() >= 10.0 and self._should_bomb_wall(mask, hazards):
+            return PLACE_BOMB
+
+        return None
+
+    def _learned_action(
         self,
         observation: dict,
         mask: np.ndarray,
         hazards: dict[int, set[Cell]],
     ) -> int | None:
-        if self.rl_model is None:
+        if self.learned_policy is None:
             return None
 
         try:
-            action, _state = self.rl_model.predict(
-                preprocess_observation(observation),
+            result = self.learned_policy.act(
+                observation,
+                hidden_state=self.learned_hidden_state,
                 deterministic=True,
             )
-            candidate = int(np.asarray(action).item())
+            candidate = int(result.action)
+            confidence = float(result.confidence)
+            self.learned_hidden_state = result.hidden_state
         except Exception:
+            return None
+
+        if confidence < self.learned_min_confidence:
             return None
 
         if candidate == PLACE_BOMB and not self._escape_after_bomb_exists(hazards):
@@ -211,6 +272,14 @@ class AEManager:
         if filtered == candidate:
             return filtered
         return None
+
+    def _rl_action(
+        self,
+        observation: dict,
+        mask: np.ndarray,
+        hazards: dict[int, set[Cell]],
+    ) -> int | None:
+        return self._learned_action(observation, mask, hazards)
 
     def _planner_action(self, mask: np.ndarray, hazards: dict[int, set[Cell]]) -> int:
         if self._should_place_attack_bomb(mask, hazards):

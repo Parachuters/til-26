@@ -63,6 +63,7 @@ class BombermanSingleAgentEnv(gym.Env):
         self.observation_space = _ppo_observation_space()
         self.seen_cells: set[tuple[int, int]] = set()
         self.prev_health = 60.0
+        self.prev_base_health = 100.0
         self.prev_frozen_ticks = 0
         self.masked_actions = 0
 
@@ -130,28 +131,31 @@ class BombermanSingleAgentEnv(gym.Env):
     def _shaping_reward(self, observation: dict[str, Any]) -> float:
         reward = 0.0
         location = _location(observation)
-        step = int(observation.get("step", 0))
         if location not in self.seen_cells:
-            decay = max(0.0, 1.0 - float(step) / 100.0)
-            reward += 0.1 * decay
+            reward += 0.03
             self.seen_cells.add(location)
 
         frozen_ticks = int(observation.get("frozen_ticks", 0))
         if frozen_ticks > 0:
-            reward -= 0.5
+            reward -= 0.3
 
         health = _scalar(observation.get("health", [60.0]), 60.0)
+        base_health = _scalar(observation.get("base_health", [100.0]), 100.0)
         if (self.prev_health > 0.0 and health <= 0.0) or (
             self.prev_frozen_ticks == 0 and frozen_ticks > 0
+        ) or (
+            base_health < self.prev_base_health
         ):
             reward -= 1.0
 
         self.prev_health = health
+        self.prev_base_health = base_health
         self.prev_frozen_ticks = frozen_ticks
         return reward
 
     def _remember_observation(self, observation: dict[str, Any], include_start: bool) -> None:
         self.prev_health = _scalar(observation.get("health", [60.0]), 60.0)
+        self.prev_base_health = _scalar(observation.get("base_health", [100.0]), 100.0)
         self.prev_frozen_ticks = int(observation.get("frozen_ticks", 0))
         if include_start:
             self.seen_cells.add(_location(observation))

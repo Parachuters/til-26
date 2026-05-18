@@ -122,6 +122,14 @@ def test_embed_query_text_adds_bge_instruction_for_plain_question():
     assert query.endswith("Who governs Haven?")
 
 
+def test_time_first_defaults_use_extractive_pipeline_without_heavy_qa_models():
+    manager = _load_nlp_manager_module()
+
+    assert manager.PIPELINE_MODE == "extractive"
+    assert manager.USE_RERANKER is False
+    assert manager.USE_LLM is False
+
+
 def test_build_corpus_lexicon_extracts_lore_entities_codes_and_context():
     manager = _load_nlp_manager_module()
 
@@ -428,6 +436,9 @@ def _fake_loaded_manager(
     manager.index = _FakeIndex(dense_score)
     manager.bm25 = _FakeBM25(bm25_scores) if bm25_scores is not None else None
     manager.reranker = _FakeReranker()
+    manager.pipeline_mode = "llm"
+    manager.use_reranker = True
+    manager.use_llm = True
     manager.lexicon = lexicon or {}
     manager.doc_ids = ["DOC-1", "DOC-2", "DOC-3"]
     manager.doc_texts = [
@@ -573,3 +584,29 @@ def test_qa_uses_one_combined_llm_answer_method():
 
     assert result == {"documents": ["DOC-1", "DOC-2", "DOC-3"], "answer": "annually"}
     assert calls == {"combined": 1}
+
+
+def test_qa_extractive_mode_skips_reranker_and_llm():
+    module = _load_nlp_manager_module()
+    manager = _fake_loaded_manager(module, dense_score=0.8)
+    manager.pipeline_mode = "extractive"
+    manager.use_reranker = False
+    manager.use_llm = False
+    manager.reranker = types.SimpleNamespace(
+        predict=lambda pairs: (_ for _ in ()).throw(
+            AssertionError("reranker should not run in extractive mode")
+        )
+    )
+    manager._answer_from_evidence = types.MethodType(
+        lambda self, question, context, retrieval_signals: (_ for _ in ()).throw(
+            AssertionError("LLM answer should not run in extractive mode")
+        ),
+        manager,
+    )
+
+    result = manager.qa("How often did the CGC renew the launch permit?")
+
+    assert result == {
+        "documents": ["DOC-1", "DOC-2", "DOC-3"],
+        "answer": "The launch permit was renewed annually by the CGC.",
+    }

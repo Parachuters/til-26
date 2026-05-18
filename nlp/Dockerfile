@@ -9,6 +9,9 @@ ENV HF_HOME=/workspace/.cache/huggingface
 ENV NLP_EMBED_MODEL=BAAI/bge-small-en-v1.5
 ENV NLP_RERANKER_MODEL=BAAI/bge-reranker-base
 ENV NLP_LLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct
+ENV NLP_PIPELINE_MODE=extractive
+ENV NLP_USE_RERANKER=0
+ENV NLP_USE_LLM=0
 WORKDIR /workspace
 
 RUN pip install -U pip

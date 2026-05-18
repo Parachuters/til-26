@@ -58,6 +58,19 @@ EMBED_BATCH_SIZE = int(os.getenv("NLP_EMBED_BATCH_SIZE", "128"))
 ENTITY_EXPANSION_LIMIT = int(os.getenv("NLP_ENTITY_EXPANSION_LIMIT", "12"))
 # BM25 weight in the hybrid score (1-BM25_WEIGHT goes to dense retrieval).
 BM25_WEIGHT = float(os.getenv("NLP_BM25_WEIGHT", "0.3"))
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in _TRUE_VALUES
+
+
+PIPELINE_MODE = os.getenv("NLP_PIPELINE_MODE", "extractive").lower()
+USE_RERANKER = _env_bool("NLP_USE_RERANKER", False)
+USE_LLM = _env_bool("NLP_USE_LLM", False)
 # Use 4-bit quantisation for the LLM when bitsandbytes is available.
 USE_4BIT = os.getenv("NLP_USE_4BIT", "1") not in ("0", "false", "False", "no")
 BGE_QUERY_INSTRUCTION = (
@@ -662,7 +675,15 @@ class NLPManager:
 
         # Cross-encoder reranker — greatly improves top-3 precision for L3
         # cross-document and ambiguous questions.
-        self.reranker = CrossEncoder(RERANKER_MODEL, device=device)
+        self.pipeline_mode = PIPELINE_MODE
+        self.use_reranker = USE_RERANKER
+        self.use_llm = USE_LLM
+
+        # Cross-encoder reranker is optional because it adds per-question
+        # latency. The time-first default keeps retrieval order from RRF.
+        self.reranker = (
+            CrossEncoder(RERANKER_MODEL, device=device) if self.use_reranker else None
+        )
 
         # LLM: use 4-bit quantisation when bitsandbytes is available to halve
         # VRAM usage (~14 GB fp16 → ~4 GB int4) and speed up generation.
@@ -789,15 +810,23 @@ class NLPManager:
         ):
             return {"documents": [], "answer": ""}
 
-        combined = combined[:RERANK_TOP_K]
+        use_reranker = getattr(self, "use_reranker", USE_RERANKER)
+        use_llm = getattr(self, "use_llm", USE_LLM)
+        pipeline_mode = getattr(self, "pipeline_mode", PIPELINE_MODE)
+
+        combined = combined[: RERANK_TOP_K if use_reranker else TOP_K]
         if not combined:
             return {"documents": [], "answer": ""}
 
-        # --- Step 2: Rerank with cross-encoder ---
-        candidate_texts = [self.doc_texts[i] for i in combined]
-        pairs = [(question, t) for t in candidate_texts]
-        rerank_scores = self.reranker.predict(pairs)
-        reranked_order = np.argsort(rerank_scores)[::-1]
+        # --- Step 2: Optional rerank with cross-encoder ---
+        if use_reranker and self.reranker is not None:
+            candidate_texts = [self.doc_texts[i] for i in combined]
+            pairs = [(question, t) for t in candidate_texts]
+            rerank_scores = self.reranker.predict(pairs)
+            reranked_order = np.argsort(rerank_scores)[::-1]
+        else:
+            rerank_scores = np.array([], dtype=np.float32)
+            reranked_order = np.arange(len(combined))
 
         # Deduplicate to top-3 unique doc IDs after reranking
         seen: set[str] = set()
@@ -815,6 +844,26 @@ class NLPManager:
 
         if not top3_ids:
             return {"documents": [], "answer": ""}
+
+        if pipeline_mode == "extractive" or not use_llm:
+            context = "\n\n".join(
+                f"[{doc_id}]: {_select_evidence_snippet(question, text, max_sentences=3)}"
+                for doc_id, text in zip(top3_ids, top3_texts)
+            )
+            support_decision = _verify_question_support(
+                question,
+                context,
+                _default_qa_result("Extractive mode uses deterministic evidence."),
+            )
+            if support_decision == "contradicted_or_unsupported":
+                return {"documents": top3_ids, "answer": ""}
+
+            answer = _select_evidence_snippet(
+                question,
+                " ".join(top3_texts),
+                max_sentences=1,
+            )
+            return {"documents": top3_ids, "answer": _clean_answer(question, answer)}
 
         # --- Step 3: Answer and verify evidence in one compact LLM call ---
         context = "\n\n".join(
